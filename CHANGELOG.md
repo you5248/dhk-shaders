@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.2.0 (2026-08-21)
+
+パックマップ（1枚のテクスチャに Metallic / Occlusion / Smoothness を詰めたもの）に対応した。
+
+- `_MetallicGlossMap` のチャンネル割り当てを選べるようにした。プリセットは
+  **Unity Standard (M=R, S=A)** / **MOS・MAS (M=R, O=G, S=B)** /
+  **ORM・glTF (O=R, Roughness=G, M=B)** / **HDRP Mask (M=R, O=G, S=A)** / **Custom**。
+  Custom では Metallic / Smoothness / Occlusion をそれぞれ R/G/B/A/使わない から選べる。
+- **Roughness として解釈するトグル**を追加（ORM 系は Smoothness ではなく Roughness で入っているため）。
+- パックマップから AO を取る場合、別の Occlusion マップは読まない（二重サンプリングを避ける）。
+  ShaderGUI 側でも Occlusion 欄を畳む。
+- パックマップが sRGB でインポートされているとき、インスペクタに警告を出す
+  （マスク系はリニアでないと値が歪む）。**Importer 設定を勝手に変更はしない**。
+- PC 版・Quest 版の両方に入れた。
+
+### 互換性
+
+**既定値は Unity Standard 互換（Metallic=R / Smoothness=A / AO はパックから取らない / Roughness 反転 OFF）**
+なので、**既存マテリアルの見た目は変わらない**。
+オフスクリーン描画で「既定のマスクで描いた結果」と「明示的に R/A を指定して描いた結果」が
+バイト単位で一致することを確認済み。
+
+### 実装メモ
+
+チャンネル選択は `shader_feature` を増やさず、one-hot マスクとの内積（`dot(mg, _MetallicChannelMask)`）で行う。
+既に `shader_feature_local` が10個ありバリアントが 2^10 あるため、レイアウトのためにこれ以上増やさない判断。
+
 ## 1.1.0 (2026-08-21)
 
 バグ修正と専用 ShaderGUI の追加。マギシステムの三賢者合議で設計・レビューした。

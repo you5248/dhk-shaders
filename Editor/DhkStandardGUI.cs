@@ -113,6 +113,8 @@ namespace you5248.DhkShadersEditor
 
                 bool hiddenByOther = !string.IsNullOrEmpty(group.HiddenWhenOn) && IsOn(Find(group.HiddenWhenOn, props));
                 if (hiddenByOther) continue;
+                // パックマップから AO を取っているなら、別の Occlusion マップは読まれないので出さない
+                if (group.Toggle == "_UseOcclusionMap" && PackedAoActive(props)) continue;
 
                 var textures = Visible(group.Textures, props, isQuest);
                 var children = Visible(group.Children, props, isQuest);
@@ -141,6 +143,8 @@ namespace you5248.DhkShadersEditor
                 {
                     materialEditor.ShaderProperty(child, child.displayName);
                 }
+                // パックマップのチャンネル割り当てはテクスチャ直下に出す
+                if (group.Toggle == MetallicMapToggle) DrawPackedMapControls(materialEditor, props);
                 // Emission は GI への寄与方針もここで選ばせる（フラグだけ立てても足りないため）
                 if (group.Toggle == EmissionToggle) materialEditor.LightmapEmissionProperty();
                 EditorGUI.indentLevel--;
@@ -239,6 +243,126 @@ namespace you5248.DhkShadersEditor
             ApplyAlphaTestRenderState(material);
             // dhk 同士（PC↔Quest）の載せ替えでユーザーの None を Baked に昇格させない
             if (!fromDhk && IsOn(material, EmissionToggle)) EnsureEmissionGiDefault(material);
+        }
+
+        // ------------------------------------------------------------------
+        //  パックマップ（1枚のテクスチャに Metallic / Occlusion / Smoothness を詰めたもの）
+        // ------------------------------------------------------------------
+        private static readonly string[] PresetLabels =
+        {
+            "Unity Standard  (Metallic=R, Smoothness=A)",
+            "MOS / MAS  (Metallic=R, Occlusion=G, Smoothness=B)",
+            "ORM (glTF)  (Occlusion=R, Roughness=G, Metallic=B)",
+            "HDRP Mask  (Metallic=R, Occlusion=G, Smoothness=A)",
+            "Custom",
+        };
+
+        private static readonly string[] ChannelLabels = { "R", "G", "B", "A", "使わない" };
+
+        /// <summary>プリセット番号 → (metallic, smoothness, occlusion, roughness反転)</summary>
+        private static void PresetLayout(int preset, out int m, out int sm, out int o, out bool rough)
+        {
+            switch (preset)
+            {
+                case 1:  m = 0; sm = 2; o = 1; rough = false; return;   // MOS / MAS
+                case 2:  m = 2; sm = 1; o = 0; rough = true;  return;   // ORM
+                case 3:  m = 0; sm = 3; o = 1; rough = false; return;   // HDRP Mask
+                default: m = 0; sm = 3; o = 4; rough = false; return;   // Unity Standard
+            }
+        }
+
+        private static Vector4 ChannelToMask(int channel)
+        {
+            switch (channel)
+            {
+                case 0:  return new Vector4(1, 0, 0, 0);
+                case 1:  return new Vector4(0, 1, 0, 0);
+                case 2:  return new Vector4(0, 0, 1, 0);
+                case 3:  return new Vector4(0, 0, 0, 1);
+                default: return Vector4.zero;   // 使わない
+            }
+        }
+
+        private static int MaskToChannel(Vector4 mask)
+        {
+            if (mask.x > 0.5f) return 0;
+            if (mask.y > 0.5f) return 1;
+            if (mask.z > 0.5f) return 2;
+            if (mask.w > 0.5f) return 3;
+            return 4;
+        }
+
+        private static bool PackedAoActive(MaterialProperty[] props)
+        {
+            var useMap = Find(MetallicMapToggle, props);
+            if (!IsOn(useMap)) return false;
+            var occl = Find("_OcclusionChannelMask", props);
+            if (occl == null) return false;
+            return MaskToChannel(occl.vectorValue) != 4;
+        }
+
+        private static void DrawPackedMapControls(MaterialEditor materialEditor, MaterialProperty[] props)
+        {
+            var presetProp = Find("_PackedPreset", props);
+            var mProp = Find("_MetallicChannelMask", props);
+            var sProp = Find("_SmoothnessChannelMask", props);
+            var oProp = Find("_OcclusionChannelMask", props);
+            var roughProp = Find("_SmoothnessIsRoughness", props);
+            if (presetProp == null || mProp == null || oProp == null) return;
+
+            int preset = Mathf.Clamp(Mathf.RoundToInt(presetProp.floatValue), 0, PresetLabels.Length - 1);
+
+            EditorGUI.BeginChangeCheck();
+            preset = EditorGUILayout.Popup("チャンネル構成", preset, PresetLabels);
+            bool presetChanged = EditorGUI.EndChangeCheck();
+            if (presetChanged) presetProp.floatValue = preset;
+
+            bool custom = preset == PresetLabels.Length - 1;
+
+            if (presetChanged && !custom)
+            {
+                int m, sm, o; bool rough;
+                PresetLayout(preset, out m, out sm, out o, out rough);
+                mProp.vectorValue = ChannelToMask(m);
+                if (sProp != null) sProp.vectorValue = ChannelToMask(sm);
+                oProp.vectorValue = ChannelToMask(o);
+                if (roughProp != null) roughProp.floatValue = rough ? 1f : 0f;
+            }
+
+            if (custom)
+            {
+                EditorGUI.indentLevel++;
+                mProp.vectorValue = ChannelToMask(
+                    EditorGUILayout.Popup("Metallic", MaskToChannel(mProp.vectorValue), ChannelLabels));
+                if (sProp != null)
+                    sProp.vectorValue = ChannelToMask(
+                        EditorGUILayout.Popup("Smoothness", MaskToChannel(sProp.vectorValue), ChannelLabels));
+                oProp.vectorValue = ChannelToMask(
+                    EditorGUILayout.Popup("Occlusion", MaskToChannel(oProp.vectorValue), ChannelLabels));
+                EditorGUI.indentLevel--;
+            }
+
+            if (roughProp != null)
+            {
+                materialEditor.ShaderProperty(roughProp,
+                    new GUIContent("Roughness として解釈する (1 - 値)",
+                                   "ORM など Smoothness ではなく Roughness で入っているマップ用"));
+            }
+
+            // マスクマップは必ずリニア。sRGB のままだと値が歪む。
+            var texProp = Find("_MetallicGlossMap", props);
+            if (texProp != null && texProp.textureValue != null)
+            {
+                var path = AssetDatabase.GetAssetPath(texProp.textureValue);
+                var importer = string.IsNullOrEmpty(path) ? null : AssetImporter.GetAtPath(path) as TextureImporter;
+                if (importer != null && importer.sRGBTexture)
+                {
+                    EditorGUILayout.HelpBox(
+                        "このパックマップは sRGB としてインポートされています。" +
+                        "マスク系のテクスチャは sRGB (Color Texture) を OFF にしてください。値がずれます。",
+                        MessageType.Warning);
+                }
+            }
         }
 
         // ------------------------------------------------------------------

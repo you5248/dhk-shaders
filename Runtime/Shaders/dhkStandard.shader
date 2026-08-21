@@ -35,8 +35,16 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         [Gamma] _Metallic ("Metallic", Range(0,1)) = 0
         _Glossiness ("Smoothness", Range(0,1)) = 0.5
         [Toggle(_METALLICGLOSSMAP)] _UseMetallicMap ("Metallic/Smoothness マップを使用", Float) = 0
-        _MetallicGlossMap ("  Metallic (R) / Smoothness (A)", 2D) = "white" {}
+        _MetallicGlossMap ("  パックマップ", 2D) = "white" {}
         _GlossMapScale ("  Smoothness Map Scale", Range(0,1)) = 1.0
+        // パックマップのチャンネル割り当て。ShaderGUI のプリセットが one-hot マスクを書く。
+        // 既定は Unity Standard 互換（Metallic=R / Smoothness=A / AO はパックから取らない）
+        // なので、既存マテリアルの見た目は変わらない。
+        [HideInInspector] _PackedPreset ("", Float) = 0
+        [HideInInspector] _MetallicChannelMask ("", Vector) = (1,0,0,0)
+        [HideInInspector] _SmoothnessChannelMask ("", Vector) = (0,0,0,1)
+        [HideInInspector] _OcclusionChannelMask ("", Vector) = (0,0,0,0)
+        [HideInInspector] _SmoothnessIsRoughness ("", Float) = 0
 
         [Space]
         [Toggle(_NORMALMAP)] _UseNormalMap ("ノーマルマップを使用", Float) = 0
@@ -353,6 +361,10 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         float4 _EmissionMap_ST;
 
         fixed4 _Color;
+        half4  _MetallicChannelMask;
+        half4  _SmoothnessChannelMask;
+        half4  _OcclusionChannelMask;
+        half   _SmoothnessIsRoughness;
         half   _Cutoff;
         half   _Metallic;
         half   _Glossiness;
@@ -389,10 +401,23 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
             o.Albedo = c.rgb;
             o.Alpha  = c.a;
 
+            // パックマップ由来の AO を使ったかどうか。使ったなら別の Occlusion マップは読まない。
+            half packedAoActive = 0;
+
             #if defined(_METALLICGLOSSMAP)
                 half4 mg = tex2D(_MetallicGlossMap, TRANSFORM_TEX(IN.dhkUV, _MetallicGlossMap));
-                o.Metallic   = mg.r;
-                o.Smoothness = mg.a * _GlossMapScale;
+                // チャンネルは one-hot マスクとの内積で選ぶ（キーワードを増やさないため）
+                o.Metallic = dot(mg, _MetallicChannelMask);
+                half smoothnessSample = dot(mg, _SmoothnessChannelMask);
+                // ORM 系は Roughness で入っているので反転できるようにする
+                smoothnessSample = lerp(smoothnessSample, 1.0h - smoothnessSample, saturate(_SmoothnessIsRoughness));
+                o.Smoothness = smoothnessSample * _GlossMapScale;
+
+                packedAoActive = saturate(dot(_OcclusionChannelMask, half4(1, 1, 1, 1)));
+                if (packedAoActive > 0.5h)
+                {
+                    o.Occlusion = LerpOneTo(dot(mg, _OcclusionChannelMask), _OcclusionStrength);
+                }
             #else
                 o.Metallic   = _Metallic;
                 o.Smoothness = _Glossiness;
@@ -403,7 +428,11 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
             #endif
 
             #if defined(_OCCLUSIONMAP)
-                o.Occlusion = LerpOneTo(tex2D(_OcclusionMap, TRANSFORM_TEX(IN.dhkUV, _OcclusionMap)).g, _OcclusionStrength);
+                // パックマップから AO を取っている場合は二重に読まない
+                if (packedAoActive <= 0.5h)
+                {
+                    o.Occlusion = LerpOneTo(tex2D(_OcclusionMap, TRANSFORM_TEX(IN.dhkUV, _OcclusionMap)).g, _OcclusionStrength);
+                }
             #endif
 
             #if defined(_EMISSION)

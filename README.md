@@ -38,6 +38,28 @@ Standard マテリアルのシェーダーをこれに変えるだけで色・me
 - Alpha Cutout を切り替えたときだけ `RenderType` タグと Render Queue を書き換える
   （読み込みのたびに書くと、Render Queue 欄の手入力を潰してしまうため）
 
+## パックマップ（Metallic / Occlusion / Smoothness を1枚に詰めたもの）
+
+`_MetallicGlossMap` はチャンネル割り当てを選べる。インスペクタの「チャンネル構成」から:
+
+| プリセット | 割り当て |
+|---|---|
+| Unity Standard | Metallic=R, Smoothness=A |
+| MOS / MAS | Metallic=R, Occlusion=G, Smoothness=B |
+| ORM (glTF) | Occlusion=R, **Roughness**=G, Metallic=B |
+| HDRP Mask | Metallic=R, Occlusion=G, Smoothness=A |
+| Custom | Metallic / Smoothness / Occlusion をそれぞれ R/G/B/A/使わない から選ぶ |
+
+ORM のように Smoothness ではなく **Roughness** で入っているマップ用に、
+「Roughness として解釈する (1 - 値)」トグルがある。
+
+パックマップから AO を取る場合、別の Occlusion マップは読まれない（インスペクタでも畳まれる）。
+
+> ⚠ マスク系のテクスチャは **sRGB (Color Texture) を OFF** にすること。
+> ON のままだと値が歪む。インスペクタが警告を出す（Importer 設定を勝手に変えることはしない）。
+
+既定は Unity Standard 互換なので、**既存マテリアルの見た目は変わらない**。
+
 ## テクスチャごとの Tiling / Offset
 
 `_MainTex` / `_MetallicGlossMap` / `_BumpMap` / `_OcclusionMap` / `_EmissionMap` は

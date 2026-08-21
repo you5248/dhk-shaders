@@ -16,8 +16,15 @@ Shader "you5248/Quest/dhk Standard"
         [Gamma] _Metallic ("Metallic", Range(0,1)) = 0
         _Glossiness ("Smoothness", Range(0,1)) = 0.5
         [Toggle(_METALLICGLOSSMAP)] _UseMetallicMap ("Use Metallic/Smoothness Map", Float) = 0
-        _MetallicGlossMap ("Metallic (R) / Smoothness (A)", 2D) = "white" {}
+        _MetallicGlossMap ("Packed Map", 2D) = "white" {}
         _GlossMapScale ("Smoothness Map Scale", Range(0,1)) = 1
+        // Packed map channel layout. Defaults match Unity Standard so existing
+        // materials are unchanged. The ShaderGUI writes these one-hot masks.
+        [HideInInspector] _PackedPreset ("", Float) = 0
+        [HideInInspector] _MetallicChannelMask ("", Vector) = (1,0,0,0)
+        [HideInInspector] _SmoothnessChannelMask ("", Vector) = (0,0,0,1)
+        [HideInInspector] _OcclusionChannelMask ("", Vector) = (0,0,0,0)
+        [HideInInspector] _SmoothnessIsRoughness ("", Float) = 0
 
         [Toggle(_NORMALMAP)] _UseNormalMap ("Use Normal Map", Float) = 0
         [Normal] _BumpMap ("Normal Map", 2D) = "bump" {}
@@ -75,6 +82,8 @@ Shader "you5248/Quest/dhk Standard"
         float4 _EmissionMap_ST;
 
         fixed4 _Color;
+        half4 _MetallicChannelMask;
+        half4 _OcclusionChannelMask;
         half _Cutoff;
         half _Metallic;
         half _Glossiness;
@@ -107,12 +116,16 @@ Shader "you5248/Quest/dhk Standard"
             #endif
 
             half metallic = _Metallic;
+            half packedAoActive = 0;
+            half packedAo = 1;
             #if defined(_METALLICGLOSSMAP)
                 fixed4 mg = tex2D(_MetallicGlossMap, TRANSFORM_TEX(IN.dhkUV, _MetallicGlossMap));
                 // Must not multiply by _Metallic: it defaults to 0, which made the map
-                // a no-op. The PC shader uses mg.r directly; keep them consistent.
-                metallic = mg.r;
-                // Smoothness (mg.a / _Glossiness / _GlossMapScale) intentionally unused.
+                // a no-op. Channel selection uses the same one-hot mask as the PC shader.
+                metallic = dot(mg, _MetallicChannelMask);
+                packedAoActive = saturate(dot(_OcclusionChannelMask, half4(1, 1, 1, 1)));
+                packedAo = dot(mg, _OcclusionChannelMask);
+                // Smoothness (_Glossiness / _GlossMapScale) intentionally unused on Quest.
             #endif
 
             // Metallic darkens diffuse only — no specular term on Quest.
@@ -126,9 +139,17 @@ Shader "you5248/Quest/dhk Standard"
                 o.Normal = UnpackScaleNormal(tex2D(_BumpMap, TRANSFORM_TEX(IN.dhkUV, _BumpMap)), _BumpScale);
             #endif
 
+            // Packed AO wins; never sample both.
+            if (packedAoActive > 0.5h)
+            {
+                o.Albedo *= lerp(1.0h, packedAo, _OcclusionStrength);
+            }
             #if defined(_OCCLUSIONMAP)
+            else
+            {
                 half occ = tex2D(_OcclusionMap, TRANSFORM_TEX(IN.dhkUV, _OcclusionMap)).g;
                 o.Albedo *= lerp(1.0h, occ, _OcclusionStrength);
+            }
             #endif
 
             #if defined(_EMISSION)
