@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.3.0 (2026-08-21)
+
+**VRC Light Volumes（拡散）に対応した。**
+
+- ライトマップがあるときは `LightVolumeAdditiveSH` の**加算のみ**。
+  ベースボリュームを足すとベイクと同じ光を二重に積むため呼ばない。
+- ライトマップが無いときは Unity の SH（`ShadeSHPerPixel`）を**置換**する。加算はしない。
+- ForwardAdd では走らせない（base パスで一度だけ）。
+- 漏光対策として、サンプル位置を法線方向へずらす `_LightVolumeBias`（既定 0）を用意した。
+- Quest 版には入れていない（Lambert には鏡面の受け皿が無く、拡散だけ足す意味も薄いため）。
+
+### 鏡面は入れていない
+
+`LightVolumeSpecular` は **f0 を適用済みの最終的な反射色**を返す。
+これを `indirect.specular` に入れると後段の Unity Standard BRDF がもう一度フレネルを掛け、
+金属が破綻する。正しく載せるには BRDF の後段に加算する別の配線が要るため、
+このリリースでは拡散のみとした。
+
+### VRC Light Volumes が入っていないプロジェクトでの安全性
+
+連携先の cginc を直に include すると、相手が入っていないプロジェクトで
+**コンパイルエラーになる**（Unity のシェーダーコンパイラに `__has_include` は無い）。
+そこで二段の門を設けた。
+
+1. `Runtime/Shaders/dhkPackages.cginc`（自動生成）に `DHK_VRCLV_AVAILABLE` を書き出し、
+   シェーダーはその define があるときだけ本体を include する。
+   **出荷時は何も define していない**ので、Editor が一度も走っていなくても必ずコンパイルできる。
+   生成は内容が変わったときだけ行う（毎回書くとリインポートが回り続けるため）。
+   書き込めない配置なら黙って諦める（連携機能が無効になるだけ）。
+   手動実行は `Tools > you5248 > dhk Shaders > 連携パッケージを再検出`。
+2. ShaderGUI は Light Volumes が無ければ該当欄を出さない。
+
+なお、サーフェスシェーダーの**解析パス**は `[fastopt]` を受け付けず、
+`LightVolumes.cginc` がそれを含むため、解析パスでは include ごと除外している
+（解析パスは surf の入出力を調べるだけなので支障はない）。
+
+### 実装メモ
+
+`_UseLightVolumes` はキーワードではなく**ユニフォーム**にした。
+`shader_feature_local` が既に 10 個あってバリアントが 2^10 あり、これ以上増やしたくないため。
+LV 側の `LightVolumesEnabled()` も `[branch]` 付きの実行時判定なので、
+LV が無いワールドでは実質コストが乗らない。
+
 ## 1.2.0 (2026-08-21)
 
 パックマップ（1枚のテクスチャに Metallic / Occlusion / Smoothness を詰めたもの）に対応した。

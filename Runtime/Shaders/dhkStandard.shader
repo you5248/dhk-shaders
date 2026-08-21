@@ -73,6 +73,11 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         [ToggleUI] _MonoSHNonlinear ("  ノンリニア補正 (推奨 ON)", Float) = 1
 
         [Space]
+        [Header(VRC Light Volumes)]
+        [ToggleUI] _UseLightVolumes ("Light Volumes を使う", Float) = 1
+        _LightVolumeBias ("  サンプル位置を法線方向へずらす (漏光対策)", Range(0, 0.2)) = 0
+
+        [Space]
         [Header(Performance)]
         [Toggle(_SPECULARHIGHLIGHTS_OFF)] _SpecularHighlightsOff ("スペキュラハイライトを無効化", Float) = 0
         [Toggle(_GLOSSYREFLECTIONS_OFF)] _GlossyReflectionsOff ("リフレクション(環境マップ)を無効化", Float) = 0
@@ -108,6 +113,25 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
 
         #include "UnityPBSLighting.cginc"
         #include "UnityStandardUtils.cginc"
+
+        // 連携パッケージの検出結果（自動生成。相手が無ければ何も define されない）
+        #include "dhkPackages.cginc"
+
+        // サーフェスシェーダーは本コンパイルの前に「解析パス」を通す。この解析パスは
+        // [fastopt] のような一部の属性を受け付けず、LightVolumes.cginc がそれを含むため
+        // 解析パスでは include ごと外す。解析パスは surf の入出力を調べるだけなので、
+        // LV のコードが無くても支障はない。
+        #if defined(DHK_VRCLV_AVAILABLE) && !defined(SHADER_TARGET_SURFACE_ANALYSIS)
+            #define DHK_LV_ACTIVE 1
+            #include "Packages/red.sim.lightvolumes/Shaders/LightVolumes.cginc"
+        #endif
+
+        // Light Volumes の制御。キーワードにせずユニフォーム分岐にしているのは、
+        // shader_feature_local が既に 10 個ありバリアントが 2^10 あるため。
+        // LV 側の LightVolumesEnabled() も [branch] 付きの実行時判定なので、
+        // LV が無いワールドでは実質コストが乗らない。
+        half _UseLightVolumes;
+        half _LightVolumeBias;
 
         // =====================================================================
         //  バイキュービック・ライトマップ・フィルタ
@@ -308,6 +332,34 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
                 #else
                     o_gi.indirect.diffuse += realtimeColor;
                 #endif
+            #endif
+
+            // -----------------------------------------------------------------
+            //  VRC Light Volumes（拡散のみ）
+            //
+            //  ・ライトマップがあるとき: ベイクと同じ光を二重に積まないよう、
+            //    加算ボリューム（LightVolumeAdditiveSH）だけを足す。
+            //  ・ライトマップが無いとき: Unity の SH を「置換」する。足すと二重になる。
+            //  ・ForwardAdd では走らせない（base パスで一度だけ）。
+            //
+            //  鏡面（LightVolumeSpecular）はここに入れない。あれは f0 を適用済みの
+            //  最終的な反射色で、indirect.specular に入れると後段の Unity BRDF が
+            //  もう一度フレネルを掛けてしまい金属が破綻する。
+            // -----------------------------------------------------------------
+            #if defined(DHK_LV_ACTIVE) && !defined(UNITY_PASS_FORWARDADD)
+                UNITY_BRANCH
+                if (_UseLightVolumes > 0.5h && LightVolumesEnabled() > 0.5)
+                {
+                    float3 lvPos = data.worldPos + normalWorld * _LightVolumeBias;
+                    float3 lvL0, lvL1r, lvL1g, lvL1b;
+                    #if defined(LIGHTMAP_ON)
+                        LightVolumeAdditiveSH(lvPos, lvL0, lvL1r, lvL1g, lvL1b);
+                        o_gi.indirect.diffuse += LightVolumeEvaluate(normalWorld, lvL0, lvL1r, lvL1g, lvL1b);
+                    #else
+                        LightVolumeSH(lvPos, lvL0, lvL1r, lvL1g, lvL1b);
+                        o_gi.indirect.diffuse = LightVolumeEvaluate(normalWorld, lvL0, lvL1r, lvL1g, lvL1b);
+                    #endif
+                }
             #endif
 
             o_gi.indirect.diffuse *= occlusion;

@@ -31,6 +31,7 @@ namespace you5248.DhkShadersEditor
             public string[] Textures;        // Tiling/Offset まで出すテクスチャプロパティ名
             public string HiddenWhenOn;      // このトグルが ON のとき子項目を隠す（値がマップに乗っ取られる欄）
             public bool QuestUnsupported;    // Quest 版では意味を持たないので出さない
+            public bool NeedsLightVolumes;   // VRC Light Volumes が入っていなければ出さない
         }
 
         private const string EmissionToggle = "_UseEmission";
@@ -80,6 +81,11 @@ namespace you5248.DhkShadersEditor
                         Children = new[] { "_UseMonoSHSpec", "_MonoSHSpecMul", "_MonoSHNonlinear" },
                         Textures = None },
 
+            new Group { Header = "VRC Light Volumes", Toggle = "_UseLightVolumes",
+                        Children = new[] { "_LightVolumeBias" },
+                        Textures = None,
+                        NeedsLightVolumes = true },
+
             new Group { Header = "Performance", Toggle = null,
                         Children = new[] { "_SpecularHighlightsOff", "_GlossyReflectionsOff" },
                         Textures = None },
@@ -110,6 +116,8 @@ namespace you5248.DhkShadersEditor
             {
                 var toggle = Find(group.Toggle, props);
                 if (group.Toggle != null && toggle == null) continue;   // その構成には無い機能
+                // 連携パッケージが入っていなければ出さない（シェーダー側の define 門に対する第二の門）
+                if (group.NeedsLightVolumes && !DhkPackageDefines.LightVolumesAvailable) continue;
 
                 bool hiddenByOther = !string.IsNullOrEmpty(group.HiddenWhenOn) && IsOn(Find(group.HiddenWhenOn, props));
                 if (hiddenByOther) continue;

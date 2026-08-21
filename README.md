@@ -38,6 +38,25 @@ Standard マテリアルのシェーダーをこれに変えるだけで色・me
 - Alpha Cutout を切り替えたときだけ `RenderType` タグと Render Queue を書き換える
   （読み込みのたびに書くと、Render Queue 欄の手入力を潰してしまうため）
 
+## VRC Light Volumes（拡散）
+
+`red.sim.lightvolumes` が入っているプロジェクトでは、インスペクタに
+「VRC Light Volumes」欄が出る（入っていなければ出ない）。
+
+- ライトマップあり → 加算ボリュームだけを足す（ベイクとの二重計上を避ける）
+- ライトマップなし → Unity の SH を置き換える
+- `サンプル位置を法線方向へずらす` は漏光対策。既定 0
+
+**鏡面には対応していない。** `LightVolumeSpecular` は f0 適用済みの最終反射色を返すため、
+GI に足すと Unity の BRDF がフレネルを二重に掛けて金属が破綻する。
+拡散のみを扱う（詳細は CHANGELOG 1.3.0）。
+
+Quest 版は非対応。
+
+> Light Volumes が入っていないプロジェクトでも壊れない。
+> 自動生成の `Runtime/Shaders/dhkPackages.cginc` に define がある時だけ include する仕組み。
+> 検出をやり直したいときは `Tools > you5248 > dhk Shaders > 連携パッケージを再検出`。
+
 ## パックマップ（Metallic / Occlusion / Smoothness を1枚に詰めたもの）
 
 `_MetallicGlossMap` はチャンネル割り当てを選べる。インスペクタの「チャンネル構成」から:
