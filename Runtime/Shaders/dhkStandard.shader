@@ -1,0 +1,393 @@
+// you5248 / dhk Standard (Bicubic Lightmap)
+// -----------------------------------------------------------------------------
+// Unity ビルトイン（Forward）向けの軽量 Standard 互換シェーダー。
+// （旧 White House プロジェクト製。汎用ツールとして you5248 配下に常備）
+//   ・Standard と同じ PBR ライティング（Unity 本体の BRDF / 全ライトパス / 影 / メタパス）
+//   ・追加機能: ライトマップをバイキュービック 4 タップでサンプリングし、
+//              低解像度ベイクのブロック段差（ベイク跡）をなだらかにする
+//   ・LOD Cross-Fade（ディザ）対応: LODGroup の Fade Mode = Cross Fade で
+//              LOD 切替時にメッシュがディザパターンで滑らかに入れ替わる（ポップ抑制）
+//
+// 設計メモ:
+//   Standard ライティングを丸ごと Unity に任せ、GI フック（LightingStandardBicubic_GI）
+//   でライトマップのサンプリングだけを差し替える。これにより自作コードは最小で、
+//   コストは「ライトマップがある時にライトマップ参照が 1 → 4 タップに増える」だけ。
+//   LightVolume や追加 BRDF を持たないため Mochie / Filamented より軽い。
+//
+//   プロパティ名は Unity Standard と一致させてあるので、Standard マテリアルから
+//   このシェーダーに差し替えても各値（色・metallic・smoothness 等）は維持される。
+//   ※ ShaderGUI を持たないため、マップ系は [Toggle] キーワードで明示的に ON にする。
+// -----------------------------------------------------------------------------
+Shader "you5248/dhk Standard (Bicubic Lightmap)"
+{
+    Properties
+    {
+        _Color ("Color", Color) = (1,1,1,1)
+        _MainTex ("Albedo (RGB)", 2D) = "white" {}
+
+        [Space]
+        [Toggle(_ALPHATEST_ON)] _AlphaTest ("Alpha Cutout を有効化", Float) = 0
+        _Cutoff ("  Alpha Cutoff", Range(0,1)) = 0.5
+
+        [Space]
+        [Gamma] _Metallic ("Metallic", Range(0,1)) = 0
+        _Glossiness ("Smoothness", Range(0,1)) = 0.5
+        [Toggle(_METALLICGLOSSMAP)] _UseMetallicMap ("Metallic/Smoothness マップを使用", Float) = 0
+        _MetallicGlossMap ("  Metallic (R) / Smoothness (A)", 2D) = "white" {}
+        _GlossMapScale ("  Smoothness Map Scale", Range(0,1)) = 1.0
+
+        [Space]
+        [Toggle(_NORMALMAP)] _UseNormalMap ("ノーマルマップを使用", Float) = 0
+        [Normal] _BumpMap ("  Normal Map", 2D) = "bump" {}
+        _BumpScale ("  Normal Scale", Float) = 1.0
+
+        [Space]
+        [Toggle(_OCCLUSIONMAP)] _UseOcclusionMap ("オクルージョンマップを使用", Float) = 0
+        _OcclusionMap ("  Occlusion (G)", 2D) = "white" {}
+        _OcclusionStrength ("  Occlusion Strength", Range(0,1)) = 1.0
+
+        [Space]
+        [Toggle(_EMISSION)] _UseEmission ("エミッションを使用", Float) = 0
+        [HDR] _EmissionColor ("  Emission Color", Color) = (0,0,0)
+        _EmissionMap ("  Emission Map", 2D) = "white" {}
+
+        [Space]
+        [Header(Bake Smoothing)]
+        [Toggle(_BICUBICLIGHTMAP_ON)] _BicubicLightmap ("バイキュービック・ライトマップ (ベイク跡をなだらかに)", Float) = 1
+
+        [Space]
+        [Header(MonoSH  Bakery no Directional Mode wo MonoSH de bake suru koto)]
+        [Toggle(_MONOSH_ON)] _UseMonoSH ("MonoSH (方向つきライトマップ)", Float) = 0
+        [Toggle(_MONOSHSPEC_ON)] _UseMonoSHSpec ("  ベイクスペキュラ (焼いた光の艶)", Float) = 0
+        _MonoSHSpecMul ("  ベイクスペキュラ強さ", Range(0,2)) = 1
+        [ToggleUI] _MonoSHNonlinear ("  ノンリニア補正 (推奨 ON)", Float) = 1
+
+        [Space]
+        [Header(Performance)]
+        [Toggle(_SPECULARHIGHLIGHTS_OFF)] _SpecularHighlightsOff ("スペキュラハイライトを無効化", Float) = 0
+        [Toggle(_GLOSSYREFLECTIONS_OFF)] _GlossyReflectionsOff ("リフレクション(環境マップ)を無効化", Float) = 0
+    }
+
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" "Queue"="Geometry" }
+        LOD 200
+
+        CGPROGRAM
+        // Standard ライティングを継承した独自ライティングモデル "StandardBicubic" を使用。
+        // exclude_path:deferred / prepass → VRChat は Forward なので Deferred 系は生成せず軽量化。
+        #pragma surface surf StandardBicubic fullforwardshadows addshadow exclude_path:deferred exclude_path:prepass
+        #pragma target 4.0
+        #pragma multi_compile_instancing
+        // LODGroup の Cross Fade（ディザによる LOD 切替フェード）対応。
+        // 全生成パス（forward / shadow）に適用され、影も一緒にフェードする。
+        #pragma multi_compile _ LOD_FADE_CROSSFADE
+
+        // 機能トグル（ShaderGUI を持たないので Inspector の [Toggle] で ON/OFF）
+        #pragma shader_feature_local _ALPHATEST_ON
+        #pragma shader_feature_local _METALLICGLOSSMAP
+        #pragma shader_feature_local _NORMALMAP
+        #pragma shader_feature_local _OCCLUSIONMAP
+        #pragma shader_feature_local _EMISSION
+        #pragma shader_feature_local _BICUBICLIGHTMAP_ON
+        #pragma shader_feature_local _SPECULARHIGHLIGHTS_OFF
+        #pragma shader_feature_local _GLOSSYREFLECTIONS_OFF
+        #pragma shader_feature_local _MONOSH_ON
+        #pragma shader_feature_local _MONOSHSPEC_ON
+
+        #include "UnityPBSLighting.cginc"
+        #include "UnityStandardUtils.cginc"
+
+        // =====================================================================
+        //  バイキュービック・ライトマップ・フィルタ
+        //  低解像度ライトマップをなめらかに補間してベイクのブロック段差を消す。
+        //  4 個のバイリニアタップで B-spline バイキュービックを近似（Filamented 方式）。
+        // =====================================================================
+        float4 dhk_CubicWeights(float v)
+        {
+            float4 n = float4(1.0, 2.0, 3.0, 4.0) - v;
+            float4 s = n * n * n;
+            float x = s.x;
+            float y = s.y - 4.0 * s.x;
+            float z = s.z - 4.0 * s.y + 6.0 * s.x;
+            float w = 6.0 - x - y - z;
+            return float4(x, y, z, w);
+        }
+
+        // unity_Lightmap を texelSize=(w,h,1/w,1/h) でバイキュービック補間
+        half4 dhk_SampleLightmapBicubic(float2 coord, float4 texelSize)
+        {
+            coord = coord * texelSize.xy - 0.5;
+            float fx = frac(coord.x);
+            float fy = frac(coord.y);
+            coord.x -= fx;
+            coord.y -= fy;
+
+            float4 xcubic = dhk_CubicWeights(fx);
+            float4 ycubic = dhk_CubicWeights(fy);
+
+            float4 c = float4(coord.x - 0.5, coord.x + 1.5, coord.y - 0.5, coord.y + 1.5);
+            float4 s = float4(xcubic.x + xcubic.y, xcubic.z + xcubic.w,
+                              ycubic.x + ycubic.y, ycubic.z + ycubic.w);
+            float4 offset = c + float4(xcubic.y, xcubic.w, ycubic.y, ycubic.w) / s;
+
+            half4 sample0 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.x, offset.z) * texelSize.zw);
+            half4 sample1 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.y, offset.z) * texelSize.zw);
+            half4 sample2 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.x, offset.w) * texelSize.zw);
+            half4 sample3 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.y, offset.w) * texelSize.zw);
+
+            float sx = s.x / (s.x + s.y);
+            float sy = s.z / (s.z + s.w);
+            return lerp(lerp(sample3, sample2, sx),
+                        lerp(sample1, sample0, sx), sy);
+        }
+
+        // ライトマップ参照を 1 箇所に集約。トグル OFF / 非 D3D11 時は通常のバイリニア。
+        half4 dhk_SampleLightmap(float2 uv)
+        {
+            #if defined(_BICUBICLIGHTMAP_ON) && defined(SHADER_API_D3D11)
+                float w, h;
+                unity_Lightmap.GetDimensions(w, h);
+                float4 texelSize = float4(w, h, 1.0 / w, 1.0 / h);
+                return dhk_SampleLightmapBicubic(uv, texelSize);
+            #else
+                return UNITY_SAMPLE_TEX2D(unity_Lightmap, uv);
+            #endif
+        }
+
+        // =====================================================================
+        //  MonoSH（Bakery の Directional Mode = MonoSH でベイクしたライトマップ）
+        //  unity_Lightmap に明るさ L0、unity_LightmapInd に支配方向（0..1 エンコード）。
+        //  そこから SH の L1 を復元し、法線方向に評価して拡散を得る。
+        //  さらに支配方向を「焼かれた光の向き」とみなすと鏡面も作れる。
+        //  数式は Assets/Bakery/shader/Bakery.cginc の BakeryMonoSH() に準拠。
+        // =====================================================================
+        half _MonoSHNonlinear;
+
+        #if defined(_MONOSH_ON)
+        half _MonoSHSpecMul;
+
+        // SH L1 のノンリニア評価（Geomerics）。暗部の潰れとリンギングを抑える。
+        float dhk_ShL1Geomerics(float L0, float3 L1, float3 n)
+        {
+            float R0 = max(L0, 1e-5);
+            float3 R1 = 0.5 * L1;
+            float lenR1 = length(R1);
+            float q = dot(normalize(R1 + 1e-6), n) * 0.5 + 0.5;
+            float p = 1.0 + 2.0 * lenR1 / R0;
+            float a = (1.0 - lenR1 / R0) / (1.0 + lenR1 / R0);
+            return R0 * (a + (1.0 - a) * (p + 1.0) * pow(q, p));
+        }
+
+        // L0（デコード済みライトマップ色）と支配方向から拡散と鏡面を作る。
+        // viewDir は面から視点へ向く向き（UnityGIInput.worldViewDir と同じ向き）。
+        void dhk_MonoSH(half3 L0, float2 lmUV, half3 normalWorld, half3 viewDir, half smoothness,
+                        out half3 diffuseOut, out half3 specularOut)
+        {
+            half3 dominantDir = UNITY_SAMPLE_TEX2D_SAMPLER(unity_LightmapInd, unity_Lightmap, lmUV).xyz;
+            half3 nL1 = dominantDir * 2 - 1;
+            half3 L1x = nL1.x * L0 * 2;
+            half3 L1y = nL1.y * L0 * 2;
+            half3 L1z = nL1.z * L0 * 2;
+
+            half3 sh = L0 + normalWorld.x * L1x + normalWorld.y * L1y + normalWorld.z * L1z;
+            if (_MonoSHNonlinear > 0.5)
+            {
+                // 輝度だけノンリニア評価し、その比率を RGB に掛け戻す（Bakery と同じ手法）
+                float lumaSH = dhk_ShL1Geomerics(dot(L0, 1), float3(dot(L1x, 1), dot(L1y, 1), dot(L1z, 1)), normalWorld);
+                float regularLumaSH = dot(sh, 1);
+                sh *= lerp(1, lumaSH / max(regularLumaSH, 1e-5), saturate(regularLumaSH * 16));
+}
+            diffuseOut = max(sh, 0.0);
+
+            specularOut = 0;
+            #if defined(_MONOSHSPEC_ON)
+                // GGX の D 項だけを掛けた値を indirect.specular に載せる。
+                // フレネルと specColor は後段の Unity BRDF が掛けるため、ここでは掛けない。
+                half3 halfDir = Unity_SafeNormalize(normalize(nL1) + viewDir);
+                half nh = saturate(dot(normalWorld, halfDir));
+                half roughness = PerceptualRoughnessToRoughness(SmoothnessToPerceptualRoughness(smoothness));
+                half spec = GGXTerm(nh, roughness);
+                half3 shSpec = L0 + nL1.x * L1x + nL1.y * L1y + nL1.z * L1z;
+                specularOut = max(spec * shSpec, 0.0) * _MonoSHSpecMul;
+            #endif
+        }
+        #endif
+
+        // =====================================================================
+        //  GI（Standard の UnityGI_Base 相当をバイキュービックライトマップ版に置換）
+        //  ※ベイクライトマップのサンプルだけを差し替え、その他（SH / 方向ライトマップ
+        //    デコード / シャドウマスク合成 / 動的ライトマップ）は Standard と同一挙動。
+        // =====================================================================
+        inline UnityGI dhk_UnityGI_Base(UnityGIInput data, half occlusion, half3 normalWorld, half smoothness)
+        {
+            UnityGI o_gi;
+            ResetUnityGI(o_gi);
+
+            // リアルタイム影とベイク影（シャドウマスク）の合成（Standard と同じ）
+            #if defined(HANDLE_SHADOWS_BLENDING_IN_GI)
+                half bakedAtten = UnitySampleBakedOcclusion(data.lightmapUV.xy, data.worldPos);
+                float zDist = dot(_WorldSpaceCameraPos - data.worldPos, UNITY_MATRIX_V[2].xyz);
+                float fadeDist = UnityComputeShadowFadeDistance(data.worldPos, zDist);
+                data.atten = UnityMixRealtimeAndBakedShadows(data.atten, bakedAtten, UnityComputeShadowFade(fadeDist));
+            #endif
+
+            o_gi.light = data.light;
+            o_gi.light.color *= data.atten;
+
+            #if UNITY_SHOULD_SAMPLE_SH
+                o_gi.indirect.diffuse = ShadeSHPerPixel(normalWorld, data.ambient, data.worldPos);
+            #endif
+
+            #if defined(LIGHTMAP_ON)
+                // ★ベイクライトマップをバイキュービックで取得（ここが「ベイク跡なだらか化」）
+                half4 bakedColorTex = dhk_SampleLightmap(data.lightmapUV.xy);
+                half3 bakedColor = DecodeLightmap(bakedColorTex);
+
+                // MonoSH ベイクでは Unity 側が CombinedDirectional になり DIRLIGHTMAP_COMBINED も立つ。
+                // 方向マップの意味が Unity 標準とは別物なので、_MONOSH_ON を先に判定して
+                // DecodeDirectionalLightmap を通さないこと。
+                #if defined(_MONOSH_ON)
+                    half3 monoDiff, monoSpec;
+                    dhk_MonoSH(bakedColor, data.lightmapUV.xy, normalWorld, data.worldViewDir, smoothness, monoDiff, monoSpec);
+                    o_gi.indirect.diffuse += monoDiff;
+                    // ベイクスペキュラは環境反射と同じ枠に載せる（後段でフレネルが掛かる）。
+                    // 加算パスでの二重計上を避けるため base パスのみ。
+                    #if !defined(UNITY_PASS_FORWARDADD)
+                        o_gi.indirect.specular += monoSpec;
+                    #endif
+
+                    #if defined(LIGHTMAP_SHADOW_MIXING) && !defined(SHADOWS_SHADOWMASK) && defined(SHADOWS_SCREEN)
+                        ResetUnityLight(o_gi.light);
+                        o_gi.indirect.diffuse = SubtractMainLightWithRealtimeAttenuationFromLightmap(o_gi.indirect.diffuse, data.atten, bakedColorTex, normalWorld);
+                    #endif
+                #elif defined(DIRLIGHTMAP_COMBINED)
+                    fixed4 bakedDirTex = UNITY_SAMPLE_TEX2D_SAMPLER(unity_LightmapInd, unity_Lightmap, data.lightmapUV.xy);
+                    o_gi.indirect.diffuse += DecodeDirectionalLightmap(bakedColor, bakedDirTex, normalWorld);
+
+                    #if defined(LIGHTMAP_SHADOW_MIXING) && !defined(SHADOWS_SHADOWMASK) && defined(SHADOWS_SCREEN)
+                        ResetUnityLight(o_gi.light);
+                        o_gi.indirect.diffuse = SubtractMainLightWithRealtimeAttenuationFromLightmap(o_gi.indirect.diffuse, data.atten, bakedColorTex, normalWorld);
+                    #endif
+                #else // 非方向ライトマップ
+                    o_gi.indirect.diffuse += bakedColor;
+
+                    #if defined(LIGHTMAP_SHADOW_MIXING) && !defined(SHADOWS_SHADOWMASK) && defined(SHADOWS_SCREEN)
+                        ResetUnityLight(o_gi.light);
+                        o_gi.indirect.diffuse = SubtractMainLightWithRealtimeAttenuationFromLightmap(o_gi.indirect.diffuse, data.atten, bakedColorTex, normalWorld);
+                    #endif
+                #endif
+            #endif
+
+            #ifdef DYNAMICLIGHTMAP_ON
+                // リアルタイム GI（Enlighten）。低解像度ではないので通常サンプリングで十分。
+                fixed4 realtimeColorTex = UNITY_SAMPLE_TEX2D(unity_DynamicLightmap, data.lightmapUV.zw);
+                half3 realtimeColor = DecodeRealtimeLightmap(realtimeColorTex);
+
+                #ifdef DIRLIGHTMAP_COMBINED
+                    half4 realtimeDirTex = UNITY_SAMPLE_TEX2D_SAMPLER(unity_DynamicDirectionality, unity_DynamicLightmap, data.lightmapUV.zw);
+                    o_gi.indirect.diffuse += DecodeDirectionalLightmap(realtimeColor, realtimeDirTex, normalWorld);
+                #else
+                    o_gi.indirect.diffuse += realtimeColor;
+                #endif
+            #endif
+
+            o_gi.indirect.diffuse *= occlusion;
+            return o_gi;
+        }
+
+        inline UnityGI dhk_GlobalIllumination(UnityGIInput data, half occlusion, half3 normalWorld, half smoothness, Unity_GlossyEnvironmentData glossIn)
+        {
+            UnityGI o_gi = dhk_UnityGI_Base(data, occlusion, normalWorld, smoothness);
+            // 反射（環境マップ）は base パスのみで加算。add パスでの二重加算を防ぐ。
+            // MonoSH のベイクスペキュラが既に入っている場合があるので上書きせず加算する。
+            #if !defined(UNITY_PASS_FORWARDADD)
+                o_gi.indirect.specular += UnityGI_IndirectSpecular(data, occlusion, glossIn);
+            #endif
+            return o_gi;
+        }
+
+        // =====================================================================
+        //  ライティングモデル "StandardBicubic"
+        //  BRDF は Unity の LightingStandard をそのまま使用。GI だけ差し替える。
+        // =====================================================================
+        inline half4 LightingStandardBicubic(SurfaceOutputStandard s, half3 viewDir, UnityGI gi)
+        {
+            return LightingStandard(s, viewDir, gi);
+        }
+
+        inline void LightingStandardBicubic_GI(SurfaceOutputStandard s, UnityGIInput data, inout UnityGI gi)
+        {
+            Unity_GlossyEnvironmentData g = UnityGlossyEnvironmentSetup(
+                s.Smoothness, data.worldViewDir, s.Normal,
+                lerp(unity_ColorSpaceDielectricSpec.rgb, s.Albedo, s.Metallic));
+            gi = dhk_GlobalIllumination(data, s.Occlusion, s.Normal, s.Smoothness, g);
+        }
+
+        // =====================================================================
+        //  サーフェス
+        // =====================================================================
+        sampler2D _MainTex;
+        sampler2D _MetallicGlossMap;
+        sampler2D _BumpMap;
+        sampler2D _OcclusionMap;
+        sampler2D _EmissionMap;
+
+        fixed4 _Color;
+        half   _Cutoff;
+        half   _Metallic;
+        half   _Glossiness;
+        half   _GlossMapScale;
+        half   _BumpScale;
+        half   _OcclusionStrength;
+        fixed4 _EmissionColor;
+
+        struct Input
+        {
+            float2 uv_MainTex;
+            float4 screenPos;   // LOD Cross-Fade ディザのスクリーン座標算出用
+        };
+
+        void surf(Input IN, inout SurfaceOutputStandard o)
+        {
+            // LOD Cross-Fade（ディザ）。unity_LODFade と 4x4 ディザマスクで clip。
+            // LOD_FADE_CROSSFADE が無効な時はコード自体が生成されず無コスト。
+            #ifdef LOD_FADE_CROSSFADE
+                UnityApplyDitherCrossFade(IN.screenPos.xy / max(IN.screenPos.w, 1e-5) * _ScreenParams.xy);
+            #endif
+
+            fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * _Color;
+
+            #if defined(_ALPHATEST_ON)
+                clip(c.a - _Cutoff);
+            #endif
+
+            o.Albedo = c.rgb;
+            o.Alpha  = c.a;
+
+            #if defined(_METALLICGLOSSMAP)
+                half4 mg = tex2D(_MetallicGlossMap, IN.uv_MainTex);
+                o.Metallic   = mg.r;
+                o.Smoothness = mg.a * _GlossMapScale;
+            #else
+                o.Metallic   = _Metallic;
+                o.Smoothness = _Glossiness;
+            #endif
+
+            #if defined(_NORMALMAP)
+                o.Normal = UnpackScaleNormal(tex2D(_BumpMap, IN.uv_MainTex), _BumpScale);
+            #endif
+
+            #if defined(_OCCLUSIONMAP)
+                o.Occlusion = LerpOneTo(tex2D(_OcclusionMap, IN.uv_MainTex).g, _OcclusionStrength);
+            #endif
+
+            #if defined(_EMISSION)
+                o.Emission = tex2D(_EmissionMap, IN.uv_MainTex).rgb * _EmissionColor.rgb;
+            #endif
+        }
+        ENDCG
+    }
+
+    FallBack "Standard"
+}
