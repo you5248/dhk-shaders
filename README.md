@@ -22,10 +22,27 @@ Unityビルトイン（BiRP / Forward）向けの**軽量Standard互換シェー
 プロパティ名を Unity Standard と一致させてあるので、
 Standard マテリアルのシェーダーをこれに変えるだけで色・metallic・smoothness 等はそのまま残る。
 
-> ⚠ **ShaderGUI を持たないため、マップ系は `[Toggle]` で明示的に ON にする必要がある。**
-> 例: ノーマルマップは `_BumpMap` にテクスチャを入れるだけでは効かない。
-> 「ノーマルマップを使用」（`_UseNormalMap` → キーワード `_NORMALMAP`）を ON にすること。
-> Metallic/Smoothness マップ（`_METALLICGLOSSMAP`）、Alpha Cutout（`_ALPHATEST_ON`）等も同様。
+マップ系は `[Toggle]` で明示的に ON にする方式（`_BumpMap` にテクスチャを入れるだけでは効かない）。
+ただし専用の ShaderGUI が入っているので、Standard から乗り換えたときは
+**割り当て済みのマップからトグルを自動で立てる**。手で入れ直す必要はない。
+
+## インスペクタ（ShaderGUI）
+
+`you5248.DhkShadersEditor.DhkStandardGUI` が PC 版・Quest 版の両方を描画する。
+
+- 機能トグルが OFF の項目は畳んで表示しない
+- **Tiling/Offset は実際に効くテクスチャにだけ出す**（各マップが自分の ST を持つ）
+- Metallic/Smoothness マップが ON のときは、上書きされる `Metallic` / `Smoothness` を隠す
+- Quest 版で読まれないプロパティ（`Smoothness` 等、PC からのコピー互換で残しているもの）は出さない
+- Emission の ON/OFF に応じて `globalIlluminationFlags` を同期する（未設定なら Baked を既定にする）
+- Alpha Cutout を切り替えたときだけ `RenderType` タグと Render Queue を書き換える
+  （読み込みのたびに書くと、Render Queue 欄の手入力を潰してしまうため）
+
+## テクスチャごとの Tiling / Offset
+
+`_MainTex` / `_MetallicGlossMap` / `_BumpMap` / `_OcclusionMap` / `_EmissionMap` は
+**それぞれ独立した Tiling/Offset を持つ**。生の UV を1本だけ渡し、
+サーフェス側で各 `_ST` を適用しているため、補間子はバリアントによらず一定。
 
 ## Mochie が入っているプロジェクトでの利点
 

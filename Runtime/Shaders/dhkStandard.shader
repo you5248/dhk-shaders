@@ -16,7 +16,9 @@
 //
 //   プロパティ名は Unity Standard と一致させてあるので、Standard マテリアルから
 //   このシェーダーに差し替えても各値（色・metallic・smoothness 等）は維持される。
-//   ※ ShaderGUI を持たないため、マップ系は [Toggle] キーワードで明示的に ON にする。
+//   ※ マップ系は [Toggle] キーワードで明示的に ON にする方式。専用の ShaderGUI
+//     （you5248.DhkShadersEditor.DhkStandardGUI）が OFF の項目を畳み、Standard から
+//     乗り換えた際は割り当て済みマップからトグルを推測して立てる。
 // -----------------------------------------------------------------------------
 Shader "you5248/dhk Standard (Bicubic Lightmap)"
 {
@@ -76,14 +78,15 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         CGPROGRAM
         // Standard ライティングを継承した独自ライティングモデル "StandardBicubic" を使用。
         // exclude_path:deferred / prepass → VRChat は Forward なので Deferred 系は生成せず軽量化。
-        #pragma surface surf StandardBicubic fullforwardshadows addshadow exclude_path:deferred exclude_path:prepass
+        #pragma surface surf StandardBicubic fullforwardshadows addshadow dithercrossfade vertex:dhkVert exclude_path:deferred exclude_path:prepass
         #pragma target 4.0
         #pragma multi_compile_instancing
         // LODGroup の Cross Fade（ディザによる LOD 切替フェード）対応。
-        // 全生成パス（forward / shadow）に適用され、影も一緒にフェードする。
+        // 上の #pragma surface の dithercrossfade がディザ clip を全生成パス
+        // （forward / shadow）へ自動で挿入する。手書きの screenPos は不要。
         #pragma multi_compile _ LOD_FADE_CROSSFADE
 
-        // 機能トグル（ShaderGUI を持たないので Inspector の [Toggle] で ON/OFF）
+        // 機能トグル（Inspector の [Toggle] で ON/OFF。ShaderGUI が OFF の項目を畳む）
         #pragma shader_feature_local _ALPHATEST_ON
         #pragma shader_feature_local _METALLICGLOSSMAP
         #pragma shader_feature_local _NORMALMAP
@@ -204,9 +207,16 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
             #if defined(_MONOSHSPEC_ON)
                 // GGX の D 項だけを掛けた値を indirect.specular に載せる。
                 // フレネルと specColor は後段の Unity BRDF が掛けるため、ここでは掛けない。
-                half3 halfDir = Unity_SafeNormalize(normalize(nL1) + viewDir);
+                // nL1 がゼロ長だと方向情報が無い。normalize() は NaN を返すし、
+                // 単にガードするだけでは halfDir≒viewDir になり「方向が無いのに
+                // 視線へ追従するハイライト」という偽の艶が出る。長さで打ち切る。
+                float len2 = dot(nL1, nL1);
+                if (len2 < 1e-8) return;
+                half3 lightDir = nL1 * rsqrt(len2);
+                half3 halfDir = Unity_SafeNormalize(lightDir + viewDir);
                 half nh = saturate(dot(normalWorld, halfDir));
-                half roughness = PerceptualRoughnessToRoughness(SmoothnessToPerceptualRoughness(smoothness));
+                // roughness=0 は GGXTerm が発散するため下限を設ける。
+                half roughness = max(PerceptualRoughnessToRoughness(SmoothnessToPerceptualRoughness(smoothness)), 0.002);
                 half spec = GGXTerm(nh, roughness);
                 half3 shSpec = L0 + nL1.x * L1x + nL1.y * L1y + nL1.z * L1z;
                 specularOut = max(spec * shSpec, 0.0) * _MonoSHSpecMul;
@@ -333,6 +343,15 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         sampler2D _OcclusionMap;
         sampler2D _EmissionMap;
 
+        // 各テクスチャの Tiling/Offset。サーフェスシェーダーの uv_MainTex を使うと
+        // 全テクスチャが _MainTex の ST で引かれてしまうため、生 UV を1本だけ渡して
+        // ここの _ST を surf 側で個別に適用する。
+        float4 _MainTex_ST;
+        float4 _MetallicGlossMap_ST;
+        float4 _BumpMap_ST;
+        float4 _OcclusionMap_ST;
+        float4 _EmissionMap_ST;
+
         fixed4 _Color;
         half   _Cutoff;
         half   _Metallic;
@@ -342,21 +361,26 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         half   _OcclusionStrength;
         fixed4 _EmissionColor;
 
+        // 生の texcoord0 を1本だけ渡す。名前を uv_ で始めないのは、
+        // サーフェスシェーダーが uv_ 始まりを「そのテクスチャの ST で変換済み」として
+        // 特別扱いするため。ここでは未変換のまま受け取りたい。
         struct Input
         {
-            float2 uv_MainTex;
-            float4 screenPos;   // LOD Cross-Fade ディザのスクリーン座標算出用
+            float2 dhkUV;
         };
+
+        void dhkVert(inout appdata_full v, out Input o)
+        {
+            UNITY_INITIALIZE_OUTPUT(Input, o);
+            o.dhkUV = v.texcoord.xy;
+        }
 
         void surf(Input IN, inout SurfaceOutputStandard o)
         {
-            // LOD Cross-Fade（ディザ）。unity_LODFade と 4x4 ディザマスクで clip。
-            // LOD_FADE_CROSSFADE が無効な時はコード自体が生成されず無コスト。
-            #ifdef LOD_FADE_CROSSFADE
-                UnityApplyDitherCrossFade(IN.screenPos.xy / max(IN.screenPos.w, 1e-5) * _ScreenParams.xy);
-            #endif
+            // LOD Cross-Fade のディザ clip は #pragma surface の dithercrossfade が
+            // 全生成パスへ自動挿入するため、ここには書かない。
 
-            fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * _Color;
+            fixed4 c = tex2D(_MainTex, TRANSFORM_TEX(IN.dhkUV, _MainTex)) * _Color;
 
             #if defined(_ALPHATEST_ON)
                 clip(c.a - _Cutoff);
@@ -366,7 +390,7 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
             o.Alpha  = c.a;
 
             #if defined(_METALLICGLOSSMAP)
-                half4 mg = tex2D(_MetallicGlossMap, IN.uv_MainTex);
+                half4 mg = tex2D(_MetallicGlossMap, TRANSFORM_TEX(IN.dhkUV, _MetallicGlossMap));
                 o.Metallic   = mg.r;
                 o.Smoothness = mg.a * _GlossMapScale;
             #else
@@ -375,19 +399,20 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
             #endif
 
             #if defined(_NORMALMAP)
-                o.Normal = UnpackScaleNormal(tex2D(_BumpMap, IN.uv_MainTex), _BumpScale);
+                o.Normal = UnpackScaleNormal(tex2D(_BumpMap, TRANSFORM_TEX(IN.dhkUV, _BumpMap)), _BumpScale);
             #endif
 
             #if defined(_OCCLUSIONMAP)
-                o.Occlusion = LerpOneTo(tex2D(_OcclusionMap, IN.uv_MainTex).g, _OcclusionStrength);
+                o.Occlusion = LerpOneTo(tex2D(_OcclusionMap, TRANSFORM_TEX(IN.dhkUV, _OcclusionMap)).g, _OcclusionStrength);
             #endif
 
             #if defined(_EMISSION)
-                o.Emission = tex2D(_EmissionMap, IN.uv_MainTex).rgb * _EmissionColor.rgb;
+                o.Emission = tex2D(_EmissionMap, TRANSFORM_TEX(IN.dhkUV, _EmissionMap)).rgb * _EmissionColor.rgb;
             #endif
         }
         ENDCG
     }
 
     FallBack "Standard"
+    CustomEditor "you5248.DhkShadersEditor.DhkStandardGUI"
 }

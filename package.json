@@ -1,7 +1,7 @@
 {
   "name": "com.you5248.dhk-shaders",
   "displayName": "dhk Shaders",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "unity": "2022.3",
   "description": "Unityビルトイン(BiRP/Forward)向けの軽量Standard互換シェーダー。ライトマップをバイキュービック4タップでサンプリングして低解像度ベイクのブロック段差をならし、MonoSH(指向性ライトマップ)とLOD Cross-Fadeに対応する。プロパティ名はUnity Standardと一致しているため、Standardマテリアルから差し替えても値が保たれる。Quest向けの軽量版を同梱。",
   "license": "See LICENSE",

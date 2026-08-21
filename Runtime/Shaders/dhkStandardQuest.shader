@@ -45,7 +45,7 @@ Shader "you5248/Quest/dhk Standard"
         CGPROGRAM
         // Quest: baked lightmaps/probes, diffuse only (no specular / reflection probes).
         // Do not generate ForwardAdd, realtime-shadow, deferred, or prepass variants.
-        #pragma surface surf Lambert noforwardadd noshadow nolppv exclude_path:deferred exclude_path:prepass
+        #pragma surface surf Lambert noforwardadd noshadow nolppv dithercrossfade vertex:dhkVert exclude_path:deferred exclude_path:prepass
         #pragma target 3.5
         #pragma multi_compile_instancing
         #pragma multi_compile _ LOD_FADE_CROSSFADE
@@ -66,6 +66,14 @@ Shader "you5248/Quest/dhk Standard"
         sampler2D _OcclusionMap;
         sampler2D _EmissionMap;
 
+        // Per-texture Tiling/Offset. Using uv_MainTex would force every map to be
+        // sampled with _MainTex's ST, so pass one raw UV and apply each _ST in surf.
+        float4 _MainTex_ST;
+        float4 _MetallicGlossMap_ST;
+        float4 _BumpMap_ST;
+        float4 _OcclusionMap_ST;
+        float4 _EmissionMap_ST;
+
         fixed4 _Color;
         half _Cutoff;
         half _Metallic;
@@ -75,28 +83,35 @@ Shader "you5248/Quest/dhk Standard"
         half _OcclusionStrength;
         fixed4 _EmissionColor;
 
+        // Raw texcoord0. The name must not start with uv_, otherwise the surface
+        // shader generator would pre-transform it with that texture's ST.
         struct Input
         {
-            float2 uv_MainTex;
-            float4 screenPos;
+            float2 dhkUV;
         };
+
+        void dhkVert(inout appdata_full v, out Input o)
+        {
+            UNITY_INITIALIZE_OUTPUT(Input, o);
+            o.dhkUV = v.texcoord.xy;
+        }
 
         void surf(Input IN, inout SurfaceOutput o)
         {
-            #if defined(LOD_FADE_CROSSFADE)
-                UnityApplyDitherCrossFade(
-                    IN.screenPos.xy / max(IN.screenPos.w, 1e-5) * _ScreenParams.xy);
-            #endif
+            // The dither clip for LOD Cross-Fade is injected into every generated pass
+            // by the dithercrossfade option on #pragma surface.
 
-            fixed4 albedo = tex2D(_MainTex, IN.uv_MainTex) * _Color;
+            fixed4 albedo = tex2D(_MainTex, TRANSFORM_TEX(IN.dhkUV, _MainTex)) * _Color;
             #if defined(_ALPHATEST_ON)
                 clip(albedo.a - _Cutoff);
             #endif
 
             half metallic = _Metallic;
             #if defined(_METALLICGLOSSMAP)
-                fixed4 mg = tex2D(_MetallicGlossMap, IN.uv_MainTex);
-                metallic = mg.r * _Metallic;
+                fixed4 mg = tex2D(_MetallicGlossMap, TRANSFORM_TEX(IN.dhkUV, _MetallicGlossMap));
+                // Must not multiply by _Metallic: it defaults to 0, which made the map
+                // a no-op. The PC shader uses mg.r directly; keep them consistent.
+                metallic = mg.r;
                 // Smoothness (mg.a / _Glossiness / _GlossMapScale) intentionally unused.
             #endif
 
@@ -105,23 +120,23 @@ Shader "you5248/Quest/dhk Standard"
             o.Alpha = albedo.a;
             o.Specular = 0;
             o.Gloss = 0;
-            o.Normal = half3(0, 0, 1);
             o.Emission = 0;
 
             #if defined(_NORMALMAP)
-                o.Normal = UnpackScaleNormal(tex2D(_BumpMap, IN.uv_MainTex), _BumpScale);
+                o.Normal = UnpackScaleNormal(tex2D(_BumpMap, TRANSFORM_TEX(IN.dhkUV, _BumpMap)), _BumpScale);
             #endif
 
             #if defined(_OCCLUSIONMAP)
-                half occ = tex2D(_OcclusionMap, IN.uv_MainTex).g;
+                half occ = tex2D(_OcclusionMap, TRANSFORM_TEX(IN.dhkUV, _OcclusionMap)).g;
                 o.Albedo *= lerp(1.0h, occ, _OcclusionStrength);
             #endif
 
             #if defined(_EMISSION)
-                o.Emission = tex2D(_EmissionMap, IN.uv_MainTex).rgb * _EmissionColor.rgb;
+                o.Emission = tex2D(_EmissionMap, TRANSFORM_TEX(IN.dhkUV, _EmissionMap)).rgb * _EmissionColor.rgb;
             #endif
         }
         ENDCG
     }
     FallBack Off
+    CustomEditor "you5248.DhkShadersEditor.DhkStandardGUI"
 }
