@@ -1,7 +1,6 @@
 // you5248 / dhk Standard (Bicubic Lightmap)
 // -----------------------------------------------------------------------------
 // Unity ビルトイン（Forward）向けの軽量 Standard 互換シェーダー。
-// （旧 White House プロジェクト製。汎用ツールとして you5248 配下に常備）
 //   ・Standard と同じ PBR ライティング（Unity 本体の BRDF / 全ライトパス / 影 / メタパス）
 //   ・追加機能: ライトマップをバイキュービック 4 タップでサンプリングし、
 //              低解像度ベイクのブロック段差（ベイク跡）をなだらかにする
@@ -12,7 +11,8 @@
 //   Standard ライティングを丸ごと Unity に任せ、GI フック（LightingStandardBicubic_GI）
 //   でライトマップのサンプリングだけを差し替える。これにより自作コードは最小で、
 //   コストは「ライトマップがある時にライトマップ参照が 1 → 4 タップに増える」だけ。
-//   LightVolume や追加 BRDF を持たないため Mochie / Filamented より軽い。
+//   鏡面の LightVolume や追加の BRDF を持たないため Mochie / Filamented より軽い
+//   （拡散の Light Volumes には対応している）。
 //
 //   プロパティ名は Unity Standard と一致させてあるので、Standard マテリアルから
 //   このシェーダーに差し替えても各値（色・metallic・smoothness 等）は維持される。

@@ -1,7 +1,6 @@
 # dhk Shaders
 
 Unityビルトイン（BiRP / Forward）向けの**軽量Standard互換シェーダー**。
-旧 White House プロジェクト製。汎用ツールとして you5248 配下に常備しているもの。
 
 | シェーダー | 用途 |
 |---|---|
@@ -15,7 +14,7 @@ Unityビルトイン（BiRP / Forward）向けの**軽量Standard互換シェー
   追加コストは「ライトマップがある時に参照が 1 → 4 タップに増える」だけ
 - **MonoSH**（指向性ライトマップ）対応 — ライトマップからスペキュラ／ノーマル反応を出す
 - **LOD Cross-Fade（ディザ）対応** — LODGroup の Fade Mode = Cross Fade で切替のポップを抑える
-- LightVolume や追加 BRDF を持たないぶん **Mochie / Filamented より軽い**
+- 鏡面の Light Volumes や追加の BRDF を持たないぶん **Mochie / Filamented より軽い**（拡散 LV には対応）
 
 ## Standard からの差し替え
 
@@ -100,14 +99,45 @@ Mochie は同梱のエディタスクリプトで **Unity 標準 Standard のマ
 パッケージを入れたら、そのプロジェクトの `Assets/you5248/Shaders/dhkStandard.shader` は削除すること。
 GUID が同じなので、削除してもマテリアルの参照は切れない。
 
-## 他プロジェクトでの使い方
+## 導入
+
+### VCC から入れる（推奨）
+
+VCC → **Settings** → **Packages** → **Add Repository** に次を登録する。
+
+```
+https://you5248.github.io/vpm-listing/index.json
+```
+
+以後、各プロジェクトの **Manage Project** から **dhk Shaders** を追加できる。
+
+### git clone で入れる
 
 ```sh
-cd "<移したいプロジェクト>/Packages"
-git clone <このリポジトリのURL> com.you5248.dhk-shaders
+cd "<プロジェクト>/Packages"
+git clone https://github.com/you5248/dhk-shaders.git com.you5248.dhk-shaders
 ```
 
 フォルダ名は必ず `com.you5248.dhk-shaders` にすること。
+
+## リリース手順（メンテナ向け）
+
+`Runtime/Shaders/dhkPackages.cginc` は Editor スクリプトがローカルで書き換える**生成ファイル**で、
+リポジトリには **define を含まないスタブ**をコミットしてある。
+連携先が入っている作業環境では起動後に define 入りへ書き換わるが、それをコミットしてはいけない
+（連携先が無いプロジェクトで include に失敗する）。
+作業クローンでは `git update-index --skip-worktree Runtime/Shaders/dhkPackages.cginc` で
+ローカルの書き換えを git から隠してある。
+
+リリース前に次が `DHK_PACKAGES_INCLUDED` 以外を出さないことを確認する。
+
+```sh
+git show HEAD:Runtime/Shaders/dhkPackages.cginc | grep define
+```
+
+zip は `git archive --format=zip -o com.you5248.dhk-shaders-<ver>.zip HEAD` で作り
+（ルートに `package.json` が来る）、`gh release create v<ver> <zip>` で添付する。
+その後 `vpm-listing` で `python tools/build_index.py` を実行して push する。
 
 ## MonoSH の実装について（出所）
 
