@@ -20,6 +20,15 @@
 //     （you5248.DhkShadersEditor.DhkStandardGUI）が OFF の項目を畳み、Standard から
 //     乗り換えた際は割り当て済みマップからトグルを推測して立てる。
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+//  由来と表示
+//  ・GI の合成（dhk_UnityGI_Base / dhk_GlobalIllumination）は、Unity Built-in Shaders の
+//    UnityGlobalIllumination.cginc（UnityGI_Base / UnityGlobalIllumination）を基に、
+//    ライトマップの取得と MonoSH / Light Volumes の分岐を差し込んだ改変物。
+//    Copyright (c) 2016 Unity Technologies. MIT License（THIRD_PARTY_NOTICES.md を参照）
+//  ・バイキュービック補間は GPU Gems 2 ch.20（Sigg & Hadwiger）の公開手法を独自に実装したもの
+//  ・MonoSH の拡散評価は Geomerics（CEDEC 2015）の公開資料の式を独自に実装したもの
+// -----------------------------------------------------------------------------
 Shader "you5248/dhk Standard (Bicubic Lightmap)"
 {
     Properties
@@ -136,45 +145,51 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         // =====================================================================
         //  バイキュービック・ライトマップ・フィルタ
         //  低解像度ライトマップをなめらかに補間してベイクのブロック段差を消す。
-        //  4 個のバイリニアタップで B-spline バイキュービックを近似（Filamented 方式）。
+        //  3次 B-spline の4つの重みを「隣り合う2テクセルの内分点」2つに畳み込み、
+        //  バイリニア4タップで評価する。GPU Gems 2, ch.20
+        //  "Fast Third-Order Texture Filtering"（Sigg & Hadwiger, 2005）で公開された手法。
         // =====================================================================
-        float4 dhk_CubicWeights(float v)
+
+        // 3次 B-spline の基底関数。t は格子間の小数位置（0..1）。w0+w1+w2+w3 = 1。
+        void dhk_BSplineWeights(float t, out float w0, out float w1, out float w2, out float w3)
         {
-            float4 n = float4(1.0, 2.0, 3.0, 4.0) - v;
-            float4 s = n * n * n;
-            float x = s.x;
-            float y = s.y - 4.0 * s.x;
-            float z = s.z - 4.0 * s.y + 6.0 * s.x;
-            float w = 6.0 - x - y - z;
-            return float4(x, y, z, w);
+            float t2 = t * t;
+            float t3 = t2 * t;
+            w0 = (1.0 / 6.0) * (-t3 + 3.0 * t2 - 3.0 * t + 1.0);
+            w1 = (1.0 / 6.0) * ( 3.0 * t3 - 6.0 * t2 + 4.0);
+            w2 = (1.0 / 6.0) * (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0);
+            w3 = (1.0 / 6.0) * t3;
         }
 
         // unity_Lightmap を texelSize=(w,h,1/w,1/h) でバイキュービック補間
-        half4 dhk_SampleLightmapBicubic(float2 coord, float4 texelSize)
+        half4 dhk_SampleLightmapBicubic(float2 uv, float4 texelSize)
         {
-            coord = coord * texelSize.xy - 0.5;
-            float fx = frac(coord.x);
-            float fy = frac(coord.y);
-            coord.x -= fx;
-            coord.y -= fy;
+            // テクセル中心基準の座標に直し、整数格子 ip と小数位置 t に分ける
+            float2 p  = uv * texelSize.xy - 0.5;
+            float2 ip = floor(p);
+            float2 t  = p - ip;
 
-            float4 xcubic = dhk_CubicWeights(fx);
-            float4 ycubic = dhk_CubicWeights(fy);
+            float w0x, w1x, w2x, w3x; dhk_BSplineWeights(t.x, w0x, w1x, w2x, w3x);
+            float w0y, w1y, w2y, w3y; dhk_BSplineWeights(t.y, w0y, w1y, w2y, w3y);
 
-            float4 c = float4(coord.x - 0.5, coord.x + 1.5, coord.y - 0.5, coord.y + 1.5);
-            float4 s = float4(xcubic.x + xcubic.y, xcubic.z + xcubic.w,
-                              ycubic.x + ycubic.y, ycubic.z + ycubic.w);
-            float4 offset = c + float4(xcubic.y, xcubic.w, ycubic.y, ycubic.w) / s;
+            // 4 テクセル (ip-1, ip, ip+1, ip+2) を、(ip-1,ip) と (ip+1,ip+2) の2組に分け、
+            // 各組は重み比で内分した1点をバイリニアで読む。組の重みは和。
+            float gx0 = w0x + w1x, gx1 = w2x + w3x;
+            float gy0 = w0y + w1y, gy1 = w2y + w3y;
+            float ax = ip.x - 1.0 + w1x / gx0;   // (ip-1, ip) の内分点
+            float bx = ip.x + 1.0 + w3x / gx1;   // (ip+1, ip+2) の内分点
+            float ay = ip.y - 1.0 + w1y / gy0;
+            float by = ip.y + 1.0 + w3y / gy1;
 
-            half4 sample0 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.x, offset.z) * texelSize.zw);
-            half4 sample1 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.y, offset.z) * texelSize.zw);
-            half4 sample2 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.x, offset.w) * texelSize.zw);
-            half4 sample3 = UNITY_SAMPLE_TEX2D(unity_Lightmap, float2(offset.y, offset.w) * texelSize.zw);
+            // テクセル座標 → UV（中心が +0.5）
+            float2 uvAA = (float2(ax, ay) + 0.5) * texelSize.zw;
+            float2 uvBA = (float2(bx, ay) + 0.5) * texelSize.zw;
+            float2 uvAB = (float2(ax, by) + 0.5) * texelSize.zw;
+            float2 uvBB = (float2(bx, by) + 0.5) * texelSize.zw;
 
-            float sx = s.x / (s.x + s.y);
-            float sy = s.z / (s.z + s.w);
-            return lerp(lerp(sample3, sample2, sx),
-                        lerp(sample1, sample0, sx), sy);
+            half4 rowA = gx0 * UNITY_SAMPLE_TEX2D(unity_Lightmap, uvAA) + gx1 * UNITY_SAMPLE_TEX2D(unity_Lightmap, uvBA);
+            half4 rowB = gx0 * UNITY_SAMPLE_TEX2D(unity_Lightmap, uvAB) + gx1 * UNITY_SAMPLE_TEX2D(unity_Lightmap, uvBB);
+            return gy0 * rowA + gy1 * rowB;
         }
 
         // ライトマップ参照を 1 箇所に集約。トグル OFF / 非 D3D11 時は通常のバイリニア。
