@@ -66,7 +66,7 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         [Toggle(_BICUBICLIGHTMAP_ON)] _BicubicLightmap ("バイキュービック・ライトマップ (ベイク跡をなだらかに)", Float) = 1
 
         [Space]
-        [Header(MonoSH  Bakery no Directional Mode wo MonoSH de bake suru koto)]
+        [Header(MonoSH  houkou tsuki lightmap wo tsukau)]
         [Toggle(_MONOSH_ON)] _UseMonoSH ("MonoSH (方向つきライトマップ)", Float) = 0
         [Toggle(_MONOSHSPEC_ON)] _UseMonoSHSpec ("  ベイクスペキュラ (焼いた光の艶)", Float) = 0
         _MonoSHSpecMul ("  ベイクスペキュラ強さ", Range(0,2)) = 1
@@ -191,67 +191,81 @@ Shader "you5248/dhk Standard (Bicubic Lightmap)"
         }
 
         // =====================================================================
-        //  MonoSH（Bakery の Directional Mode = MonoSH でベイクしたライトマップ）
-        //  unity_Lightmap に明るさ L0、unity_LightmapInd に支配方向（0..1 エンコード）。
-        //  そこから SH の L1 を復元し、法線方向に評価して拡散を得る。
-        //  さらに支配方向を「焼かれた光の向き」とみなすと鏡面も作れる。
-        //  数式は Assets/Bakery/shader/Bakery.cginc の BakeryMonoSH() に準拠。
+        //  MonoSH（方向つきライトマップ）
+        //
+        //  入力の形式:
+        //    unity_Lightmap    … 明るさ L0
+        //    unity_LightmapInd … 正規化 L1 ベクトル（長さが方向性の強さ）を 0..1 にエンコード
+        //  これは MonoSH ベイクが書き出すテクスチャ配置であり、ここではその「配置を読む」
+        //  だけを行う。デコード後の評価は下記の公開文献の式を自前で実装している。
+        //
+        //  拡散の評価式（L1 SH のノンリニア評価）は Geomerics が公開したもの:
+        //    Geomerics, "Reconstructing Diffuse Lighting from Spherical Harmonic Data"
+        //    (CEDEC 2015)
+        //    http://www.geomerics.com/wp-content/uploads/2015/08/
+        //        CEDEC_Geomerics_ReconstructingDiffuseLighting1.pdf
+        //  ARM "Simplifying Spherical Harmonics for Lighting" にも導出がある。
+        //
+        //  MonoSH では全チャンネルが同じ方向ベクトルを共有するため、
+        //  L1 = 2 * nL1 * L0 を Geomerics 式に入れると R0 が約分され、
+        //  q・p・a がチャンネルに依らない共通係数になる。つまり
+        //      sh = L0 * factor(nL1, N)
+        //  と1つの係数で書ける。輝度を作って比を掛け戻す必要はない。
         // =====================================================================
+
+        /// Geomerics の L1 ノンリニア評価を、MonoSH 用に「共通係数」へ整理したもの。
+        /// d は正規化 L1 ベクトル（|d| が方向性の強さ。物理的に 0..1）。
+        float dhk_MonoSHFactor(float3 d, float3 n)
+        {
+            float len2 = dot(d, d);
+            if (len2 < 1e-10) return 1.0;          // 方向情報が無い＝等方。係数 1
+
+            float r = saturate(sqrt(len2));        // |R1| / R0 に相当
+            float q = saturate(0.5 + 0.5 * dot(d * rsqrt(len2), n));
+            float p = 1.0 + 2.0 * r;
+            float a = (1.0 - r) / (1.0 + r);
+            return a + (1.0 - a) * (p + 1.0) * pow(q, p);
+        }
+
         half _MonoSHNonlinear;
 
         #if defined(_MONOSH_ON)
         half _MonoSHSpecMul;
 
-        // SH L1 のノンリニア評価（Geomerics）。暗部の潰れとリンギングを抑える。
-        float dhk_ShL1Geomerics(float L0, float3 L1, float3 n)
-        {
-            float R0 = max(L0, 1e-5);
-            float3 R1 = 0.5 * L1;
-            float lenR1 = length(R1);
-            float q = dot(normalize(R1 + 1e-6), n) * 0.5 + 0.5;
-            float p = 1.0 + 2.0 * lenR1 / R0;
-            float a = (1.0 - lenR1 / R0) / (1.0 + lenR1 / R0);
-            return R0 * (a + (1.0 - a) * (p + 1.0) * pow(q, p));
-        }
-
-        // L0（デコード済みライトマップ色）と支配方向から拡散と鏡面を作る。
-        // viewDir は面から視点へ向く向き（UnityGIInput.worldViewDir と同じ向き）。
+        /// L0 と正規化 L1 から拡散と鏡面を作る。
+        /// viewDir は面から視点へ向く向き（UnityGIInput.worldViewDir と同じ）。
         void dhk_MonoSH(half3 L0, float2 lmUV, half3 normalWorld, half3 viewDir, half smoothness,
                         out half3 diffuseOut, out half3 specularOut)
         {
-            half3 dominantDir = UNITY_SAMPLE_TEX2D_SAMPLER(unity_LightmapInd, unity_Lightmap, lmUV).xyz;
-            half3 nL1 = dominantDir * 2 - 1;
-            half3 L1x = nL1.x * L0 * 2;
-            half3 L1y = nL1.y * L0 * 2;
-            half3 L1z = nL1.z * L0 * 2;
+            // 0..1 エンコードを [-1,1] へ戻す
+            half3 nL1 = UNITY_SAMPLE_TEX2D_SAMPLER(unity_LightmapInd, unity_Lightmap, lmUV).xyz * 2 - 1;
 
-            half3 sh = L0 + normalWorld.x * L1x + normalWorld.y * L1y + normalWorld.z * L1z;
-            if (_MonoSHNonlinear > 0.5)
-            {
-                // 輝度だけノンリニア評価し、その比率を RGB に掛け戻す（Bakery と同じ手法）
-                float lumaSH = dhk_ShL1Geomerics(dot(L0, 1), float3(dot(L1x, 1), dot(L1y, 1), dot(L1z, 1)), normalWorld);
-                float regularLumaSH = dot(sh, 1);
-                sh *= lerp(1, lumaSH / max(regularLumaSH, 1e-5), saturate(regularLumaSH * 16));
-}
-            diffuseOut = max(sh, 0.0);
+            // 線形評価は L1 = 2*nL1*L0 を代入して整理したもの
+            //   sh = L0 + N・L1 = L0 * (1 + 2 * dot(nL1, N))
+            half factor = (_MonoSHNonlinear > 0.5)
+                        ? (half)dhk_MonoSHFactor(nL1, normalWorld)
+                        : (half)(1.0 + 2.0 * dot(nL1, normalWorld));
+            diffuseOut = max(L0 * factor, 0.0);
 
             specularOut = 0;
             #if defined(_MONOSHSPEC_ON)
-                // GGX の D 項だけを掛けた値を indirect.specular に載せる。
-                // フレネルと specColor は後段の Unity BRDF が掛けるため、ここでは掛けない。
-                // nL1 がゼロ長だと方向情報が無い。normalize() は NaN を返すし、
-                // 単にガードするだけでは halfDir≒viewDir になり「方向が無いのに
-                // 視線へ追従するハイライト」という偽の艶が出る。長さで打ち切る。
+                // 方向性がゼロなら「どこから来た光か」が無いので鏡面を作らない。
+                // 単に normalize() をガードするだけだと halfDir≒viewDir になり、
+                // 方向が無いのに視線へ追従する偽の艶が出る。
                 float len2 = dot(nL1, nL1);
                 if (len2 < 1e-8) return;
-                half3 lightDir = nL1 * rsqrt(len2);
-                half3 halfDir = Unity_SafeNormalize(lightDir + viewDir);
+
+                float directionality = saturate(sqrt(len2));
+                half3 lightDir = (half3)(nL1 * rsqrt(len2));
+                half3 halfDir  = Unity_SafeNormalize(lightDir + viewDir);
                 half nh = saturate(dot(normalWorld, halfDir));
-                // roughness=0 は GGXTerm が発散するため下限を設ける。
+                // roughness=0 は GGXTerm が発散するため下限を設ける
                 half roughness = max(PerceptualRoughnessToRoughness(SmoothnessToPerceptualRoughness(smoothness)), 0.002);
-                half spec = GGXTerm(nh, roughness);
-                half3 shSpec = L0 + nL1.x * L1x + nL1.y * L1y + nL1.z * L1z;
-                specularOut = max(spec * shSpec, 0.0) * _MonoSHSpecMul;
+
+                // GGX の D 項だけを載せる。フレネルと specColor は後段の Unity BRDF が掛ける。
+                // 光量は方向性が強いほど集中するので (1 + 2*d^2) で持ち上げる。
+                half3 specLight = L0 * (half)(1.0 + 2.0 * directionality * directionality);
+                specularOut = max(GGXTerm(nh, roughness) * specLight, 0.0) * _MonoSHSpecMul;
             #endif
         }
         #endif

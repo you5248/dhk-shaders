@@ -1,6 +1,6 @@
 // Quest-only counterpart of you5248/dhk Standard (Bicubic Lightmap).
 // Property names intentionally match the PC shader so a copied material keeps
-// its albedo/PBR values. Bicubic lightmaps, Bakery MonoSH, specular, and
+// its albedo/PBR values. Bicubic lightmaps, MonoSH, specular, and
 // reflection probes are omitted — diffuse + lightmap focused.
 Shader "you5248/Quest/dhk Standard"
 {

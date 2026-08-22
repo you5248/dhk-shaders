@@ -108,3 +108,27 @@ git clone <このリポジトリのURL> com.you5248.dhk-shaders
 ```
 
 フォルダ名は必ず `com.you5248.dhk-shaders` にすること。
+
+## MonoSH の実装について（出所）
+
+MonoSH の拡散評価には、Geomerics が公開した L1 球面調和のノンリニア評価式を用いている。
+
+- Geomerics, *Reconstructing Diffuse Lighting from Spherical Harmonic Data* (CEDEC 2015)
+  <http://www.geomerics.com/wp-content/uploads/2015/08/CEDEC_Geomerics_ReconstructingDiffuseLighting1.pdf>
+- ARM, *Simplifying Spherical Harmonics for Lighting*（同式の導出）
+
+入力は「明るさを `unity_Lightmap`、正規化 L1 ベクトルを `unity_LightmapInd` に 0..1 で入れる」
+という **MonoSH ベイクのテクスチャ配置を読む**もので、この配置に合わせている（相互運用）。
+評価式は上記の公開資料をもとに自前で実装している。
+
+MonoSH では全チャンネルが同じ方向ベクトルを共有するため、`L1 = 2 * nL1 * L0` を
+Geomerics 式へ入れると `R0` が約分され、`q` / `p` / `a` がチャンネルに依らない共通係数になる。
+そのため実装は
+
+```
+sh = L0 * factor(nL1, N)
+```
+
+の一本にまとめてある。輝度を別途作って比を掛け戻す必要はない。
+
+> この節はコードの出所についての技術的な説明であり、法的な保証や助言ではない。
