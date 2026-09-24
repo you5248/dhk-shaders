@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 
@@ -42,6 +43,7 @@ namespace you5248.DhkShadersEditor
         [MenuItem("Tools/you5248/dhk Shaders/連携パッケージを再検出")]
         internal static void Refresh()
         {
+            s_lightVolumesV3 = null;   // 連携先が更新されていても拾えるよう判定をやり直す
             var body = new StringBuilder();
             for (int i = 0; i < Targets.GetLength(0); i++)
             {
@@ -49,6 +51,11 @@ namespace you5248.DhkShadersEditor
                 var probe = Targets[i, 1];
                 if (Exists(probe)) body.Append("#define ").Append(define).Append(" 1\n");
             }
+
+            // LV 3.x の内部関数（通常/加算/PLV の分解評価に使う）は 2.x や 3.0.0 の初期の
+            // プレリリースには無いか形が違う。版番号ではなく、使う関数が実在するかで判定する
+            if (LightVolumesV3Available)
+                body.Append("#define DHK_VRCLV_V3 1\n");
 
             var content = BuildFile(body.ToString());
 
@@ -92,6 +99,47 @@ namespace you5248.DhkShadersEditor
             get { return Exists(Targets[0, 1]); }
         }
 
+        // DHK_VRCLV_V3 の経路が呼ぶ LV の内部関数。3つとも同じ形で実在するときだけ使う
+        private static readonly string[] LightVolumesV3Signatures =
+        {
+            @"void\s+LV_LightVolumeRegularSH\s*\(\s*float3\s+worldPos\s*,\s*inout\s+float3\s+L0",
+            @"void\s+LV_LightVolumeAdditiveSH\s*\(\s*float3\s+worldPos\s*,\s*inout\s+float3\s+L0\s*,\s*inout\s+float3\s+L1r\s*,\s*inout\s+float3\s+L1g\s*,\s*inout\s+float3\s+L1b\s*\)",
+            @"void\s+LV_PointLightVolumeSH\s*\(\s*float3\s+worldPos\s*,\s*float3\s+worldNormal\s*,\s*float\s+pointLightShading\s*,",
+        };
+
+        // ShaderGUI が再描画のたびに問い合わせるので、判定結果を覚えておく
+        // （ドメインの再読み込みと Refresh でやり直す）
+        private static bool? s_lightVolumesV3;
+
+        /// <summary>
+        /// LV 3.x の分解評価（影マスク・PLV の法線シェーディング）が使えるか。
+        /// 読めなければ false（＝2.x と同じ公開 API の経路。LV 3.x の上でもコンパイルできる安全側）。
+        /// </summary>
+        internal static bool LightVolumesV3Available
+        {
+            get
+            {
+                if (!s_lightVolumesV3.HasValue) s_lightVolumesV3 = DetectLightVolumesV3();
+                return s_lightVolumesV3.Value;
+            }
+        }
+
+        private static bool DetectLightVolumesV3()
+        {
+            if (!LightVolumesAvailable) return false;
+            try
+            {
+                var src = File.ReadAllText(Path.GetFullPath(Targets[0, 1]));
+                foreach (var signature in LightVolumesV3Signatures)
+                    if (!Regex.IsMatch(src, signature)) return false;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static string BuildFile(string defines)
         {
             return
@@ -107,8 +155,8 @@ namespace you5248.DhkShadersEditor
 "#ifndef DHK_PACKAGES_INCLUDED\n" +
 "#define DHK_PACKAGES_INCLUDED\n" +
 "\n" +
-defines +
-"\n" +
+// 連携先が無いときは出荷時のスタブとバイト単位で一致させる（一致しないと導入直後に必ず書き換えが走る）
+(defines.Length == 0 ? "" : defines + "\n") +
 "#endif\n";
         }
     }

@@ -4,9 +4,12 @@
 
 ## Unity Built-in Shaders
 
-- 対象: `Runtime/Shaders/dhkStandard.shader` の `dhk_UnityGI_Base` / `dhk_GlobalIllumination`
-- 由来: Unity Built-in Shaders の `UnityGlobalIllumination.cginc`（`UnityGI_Base` / `UnityGlobalIllumination`）を基に、
-  ライトマップの取得をバイキュービック補間へ差し替え、MonoSH と VRC Light Volumes の分岐を差し込んだ改変物
+- 対象1: `Runtime/Shaders/dhkStandardCore.cginc` の `dhk_UnityGI_Base` / `dhk_GlobalIllumination`
+  - 由来: Unity Built-in Shaders の `UnityGlobalIllumination.cginc`（`UnityGI_Base` / `UnityGlobalIllumination`）を基に、
+    ライトマップの取得をバイキュービック補間へ差し替え、MonoSH と VRC Light Volumes の分岐を差し込んだ改変物
+- 対象2: `Runtime/Shaders/dhkStandardCore.cginc` の `LightingStandardBicubic` / `LightingStandardBicubic_GI`
+  - 由来: Unity Built-in Shaders の `UnityPBSLighting.cginc`（`LightingStandard` / `LightingStandard_GI`）を展開し、
+    スペキュラ強調・GSAA・リムライト・LV スペキュラの割り込み点を加えた改変物
 - ライセンス: MIT License
 
 ```
@@ -34,3 +37,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - バイキュービック補間: C. Sigg, M. Hadwiger, "Fast Third-Order Texture Filtering", GPU Gems 2, ch. 20 (2005)
 - MonoSH の拡散評価: Geomerics, "Reconstructing Diffuse Lighting from Spherical Harmonic Data", CEDEC 2015
+- GSAA（法線の画面内の変化量で粗さを底上げする。論文の式を簡略化した弱めの独自の変形で、分散を粗さの二乗に足している）:
+  A. S. Kaplanyan, S. Hill, A. Patney, A. Lefohn,
+  "Filtering Distributions of Normals for Shading Antialiasing", HPG 2016 /
+  Y. Tokuyoshi, A. S. Kaplanyan, "Improved Geometric Specular Antialiasing", I3D 2019

@@ -32,6 +32,7 @@ namespace you5248.DhkShadersEditor
             public string HiddenWhenOn;      // このトグルが ON のとき子項目を隠す（値がマップに乗っ取られる欄）
             public bool QuestUnsupported;    // Quest 版では意味を持たないので出さない
             public bool NeedsLightVolumes;   // VRC Light Volumes が入っていなければ出さない
+            public bool NeedsLightVolumesV3; // LV 3.x の分解評価が使えなければ出さない（2.x では効かない項目）
         }
 
         private const string EmissionToggle = "_UseEmission";
@@ -73,6 +74,13 @@ namespace you5248.DhkShadersEditor
                         Children = new[] { "_EmissionColor" },
                         Textures = new[] { "_EmissionMap" } },
 
+            new Group { Header = "Detail Maps", Toggle = "_UseDetail",
+                        Children = new[] { "_DetailAlbedoBlend", "_DetailAlbedoStrength",
+                                           "_DetailNormalMapScale", "_DetailMSStrength",
+                                           "_DetailOcclusionStrength", "_DetailMaskStrength" },
+                        Textures = new[] { "_DetailAlbedoMap", "_DetailNormalMap",
+                                           "_DetailMetallicGlossMap", "_DetailOcclusionMap", "_DetailMask" } },
+
             new Group { Header = "Bake Smoothing", Toggle = null,
                         Children = new[] { "_BicubicLightmap" },
                         Textures = None },
@@ -82,12 +90,25 @@ namespace you5248.DhkShadersEditor
                         Textures = None },
 
             new Group { Header = "VRC Light Volumes", Toggle = "_UseLightVolumes",
-                        Children = new[] { "_LightVolumeBias" },
+                        Children = new[] { "_LightVolumeBias", "_LVSpecularMul" },
                         Textures = None,
                         NeedsLightVolumes = true },
 
+            new Group { Header = "VRC Light Volumes 3.x", Toggle = null,
+                        Children = new[] { "_LVPointLightShading", "_LVShadowMulStrength", "_LVShadowFloor" },
+                        Textures = None,
+                        NeedsLightVolumes = true, NeedsLightVolumesV3 = true },
+
+            new Group { Header = "Specular", Toggle = null,
+                        Children = new[] { "_SpecBoost", "_UseGSAA", "_GsaaVariance", "_GsaaThreshold" },
+                        Textures = None },
+
+            new Group { Header = "Rim Light", Toggle = "_DhkUseRim",
+                        Children = new[] { "_DhkRimColor", "_DhkRimIntensity", "_DhkRimPower", "_DhkRimLightMask" },
+                        Textures = None },
+
             new Group { Header = "Performance", Toggle = null,
-                        Children = new[] { "_SpecularHighlightsOff", "_GlossyReflectionsOff" },
+                        Children = new[] { "_SpecularHighlightsOff", "_GlossyReflectionsOff", "_DhkCull" },
                         Textures = None },
         };
 
@@ -118,6 +139,7 @@ namespace you5248.DhkShadersEditor
                 if (group.Toggle != null && toggle == null) continue;   // その構成には無い機能
                 // 連携パッケージが入っていなければ出さない（シェーダー側の define 門に対する第二の門）
                 if (group.NeedsLightVolumes && !DhkPackageDefines.LightVolumesAvailable) continue;
+                if (group.NeedsLightVolumesV3 && !DhkPackageDefines.LightVolumesV3Available) continue;
 
                 bool hiddenByOther = !string.IsNullOrEmpty(group.HiddenWhenOn) && IsOn(Find(group.HiddenWhenOn, props));
                 if (hiddenByOther) continue;
@@ -190,20 +212,33 @@ namespace you5248.DhkShadersEditor
         /// </summary>
         public override void ValidateMaterial(Material material)
         {
+            // スクリプトから mat.shader = で載せ替えられたマテリアルの修復。
+            // その経路では AssignNewShaderToMaterial（マップからトグルを推測）が走らず、
+            // 旧シェーダーから引き継いだキーワードだけが立っている。ここで従来どおり
+            // トグル→キーワードの同期を先にやると、そのキーワードを黙って剥がしてしまい、
+            // 「次のロードで急に真っ黒（Metallic=1 のスカラーにフォールバック）」という
+            // 遅発性の壊れ方をする（実測で確認済み）。
+            // 「キーワードON かつ トグル0 かつ テクスチャ割り当て済み」は移行の生き残り
+            // と断定できるので、キーワード側を勝たせてトグルを立てる。
+            // テクスチャ条件があるため、GUI で意図的に OFF にした状態（両方OFF・整合済み）
+            // には一切触れない。
+            RepairMigratedToggle(material, "_NORMALMAP",        "_UseNormalMap",   "_BumpMap");
+            RepairMigratedToggle(material, "_METALLICGLOSSMAP", MetallicMapToggle, "_MetallicGlossMap");
+            RepairMigratedToggle(material, "_OCCLUSIONMAP",     "_UseOcclusionMap","_OcclusionMap");
+            RepairMigratedToggle(material, "_EMISSION",         EmissionToggle,    "_EmissionMap");
+            RepairMigratedToggle(material, "_DHKDETAIL_ON",     "_UseDetail",      "_DetailAlbedoMap");
+
             SyncKeyword(material, AlphaTestToggle, "_ALPHATEST_ON");
             SyncKeyword(material, MetallicMapToggle, "_METALLICGLOSSMAP");
             SyncKeyword(material, "_UseNormalMap", "_NORMALMAP");
             SyncKeyword(material, "_UseOcclusionMap", "_OCCLUSIONMAP");
             SyncKeyword(material, EmissionToggle, "_EMISSION");
-            SyncKeyword(material, "_BicubicLightmap", "_BICUBICLIGHTMAP_ON");
-            SyncKeyword(material, "_SpecularHighlightsOff", "_SPECULARHIGHLIGHTS_OFF");
-            SyncKeyword(material, "_GlossyReflectionsOff", "_GLOSSYREFLECTIONS_OFF");
+            SyncKeyword(material, "_UseDetail", "_DHKDETAIL_ON");
 
             // MonoSH のベイクスペキュラは親が OFF なら必ず OFF（死にバリアントを作らない）
             if (!IsOn(material, "_UseMonoSH") && material.HasProperty("_UseMonoSHSpec"))
                 material.SetFloat("_UseMonoSHSpec", 0f);
             SyncKeyword(material, "_UseMonoSH", "_MONOSH_ON");
-            SyncKeyword(material, "_UseMonoSHSpec", "_MONOSHSPEC_ON");
 
             // Emission: ここで触るのは EmissiveIsBlack のビットだけ。
             // 「None（見た目だけ光らせ、ベイクには出さない）」はワールド制作では普通の選択なので、
@@ -239,6 +274,9 @@ namespace you5248.DhkShadersEditor
                 TurnOnIfTextureAssigned(material, "_MetallicGlossMap", MetallicMapToggle);
                 TurnOnIfTextureAssigned(material, "_OcclusionMap", "_UseOcclusionMap");
                 TurnOnIfTextureAssigned(material, "_EmissionMap", EmissionToggle);
+                // Standard のセカンダリマップからの乗り換え（プロパティ名は Standard と同一）
+                TurnOnIfTextureAssigned(material, "_DetailAlbedoMap", "_UseDetail");
+                TurnOnIfTextureAssigned(material, "_DetailNormalMap", "_UseDetail");
 
                 if (hadEmissionKeyword && material.HasProperty(EmissionToggle))
                     material.SetFloat(EmissionToggle, 1f);
@@ -477,6 +515,18 @@ namespace you5248.DhkShadersEditor
             if (!material.HasProperty(prop)) return;
             if (IsOn(material, prop)) material.EnableKeyword(keyword);
             else material.DisableKeyword(keyword);
+        }
+
+        /// <summary>
+        /// スクリプト移行の生き残り（キーワードON・トグル0・テクスチャあり）のトグルを立てる。
+        /// ValidateMaterial の同期がキーワードを剥がす前に呼ぶこと。
+        /// </summary>
+        private static void RepairMigratedToggle(Material material, string keyword, string toggleProp, string texProp)
+        {
+            if (!material.HasProperty(toggleProp) || !material.HasProperty(texProp)) return;
+            if (material.IsKeywordEnabled(keyword) && !IsOn(material, toggleProp)
+                && material.GetTexture(texProp) != null)
+                material.SetFloat(toggleProp, 1f);
         }
 
         private static void TurnOnIfTextureAssigned(Material material, string texProp, string toggleProp)

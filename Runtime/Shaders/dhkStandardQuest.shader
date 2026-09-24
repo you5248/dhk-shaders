@@ -42,12 +42,15 @@ Shader "you5248/Quest/dhk Standard"
         [HideInInspector] _BicubicLightmap ("PC Bicubic (unused)", Float) = 0
         [HideInInspector] _SpecularHighlightsOff ("PC Specular Off (unused)", Float) = 0
         [HideInInspector] _GlossyReflectionsOff ("PC Reflections Off (unused)", Float) = 0
+        // Same name as the PC shader so double-sided materials stay double-sided after a copy.
+        [Enum(UnityEngine.Rendering.CullMode)] _DhkCull ("Cull", Float) = 2
     }
 
     SubShader
     {
         Tags { "RenderType"="Opaque" "Queue"="Geometry" }
         LOD 150
+        Cull [_DhkCull]
 
         CGPROGRAM
         // Quest: baked lightmaps/probes, diffuse only (no specular / reflection probes).

@@ -1,5 +1,72 @@
 # Changelog
 
+## 1.5.0 (2026-09-25)
+
+**大きなプロジェクトでビルド（アップロード）中にシェーダーコンパイラが落ちる問題を、構造から直した。
+あわせて、ディテールマップ・スペキュラ強調・GSAA・リムライト・LV スペキュラ・LV 影マスク・両面描画を追加した。**
+既定値のマテリアルの見た目は 1.4.1 と同じ（ライトマップの遠景のミップの選び方だけ、「互換性と移行」を参照）。
+
+### ビルド時のシェーダーコンパイラのクラッシュ対策
+
+ビルド時、1 パスのコンパイル指示は「.shader ファイルの本文 × キーワードの列挙数（≒ 2^shader_feature 本数 × 4）」の
+ペイロードとしてワーカーへ一括で送られる。1.4.1 は本文が約 30KB の一枚岩で、見積もりは 1 パスあたり約 123MB あった。
+これに機能を足した派生版では `UnityShaderCompiler` ワーカーが `Crashed!` を繰り返してビルドが止まった（実測: 約 267MB と 354MB）。
+
+- シェーダー本体を `Runtime/Shaders/dhkStandardCore.cginc` へ移し、`.shader` は Properties と `#pragma` だけの薄皮にした。
+  include したファイルはペイロードに乗らない。
+- キーワード 4 本（`_BICUBICLIGHTMAP_ON` / `_SPECULARHIGHLIGHTS_OFF` / `_GLOSSYREFLECTIONS_OFF` / `_MONOSHSPEC_ON`）を
+  ユニフォーム分岐に置き換え、`shader_feature` を 7 本にした。
+- ペイロードの見積もりは 1 パスあたり約 5.9MB（11,489B × 2^7 × 4。法則からの推定値）。
+- ライトマップは、勾配をユニフォーム分岐の外で取り、分岐の中で `SampleGrad` で読む（ミップの選び方は通常のバイリニアのサンプルと同じ）。
+
+### 追加
+
+- **ディテールマップ**（`_UseDetail`）: Detail Albedo（合成モード: MulX2 / Multiply / Add / Overlay / Replace）、
+  Detail Normal、Detail Metallic(R)・Smoothness(A) の乗算、Detail Occlusion(G)、Detail Mask(A)。
+  各マップが自分の Tiling/Offset を持つ。効きは `_DetailAlbedoStrength` / `_DetailMSStrength` / `_DetailMaskStrength` で調整する。
+  D3D11 のサンプラー数の上限（16）を超えないよう、Detail Albedo 以外の 4 枚は Detail Albedo のサンプラーを共有する
+  （Wrap / Filter は Detail Albedo の設定に従う）
+- **スペキュラ強調** `_SpecBoost`（1〜8、既定 1）: F0 だけを持ち上げ、拡散は変えない
+- **GSAA** `_UseGSAA`（`_GsaaVariance` / `_GsaaThreshold`）: 法線の画面内の変化量に応じて粗さを底上げし、
+  遠景や細部の鏡面のちらつきを抑える。直接光と環境反射の両方に効く
+- **リムライト** `_DhkUseRim`（`_DhkRimColor`(HDR) / `_DhkRimIntensity` / `_DhkRimPower` / `_DhkRimLightMask`）
+- **LV スペキュラ** `_LVSpecularMul`（既定 0 = OFF）: VRC Light Volumes の L1 から鏡面を作り、BRDF の後で加算する
+  （GI の鏡面に入れるとフレネルが二重に掛かるため）
+- **LV 影マスク** `_LVShadowMulStrength` / `_LVShadowFloor`（VRC Light Volumes 3.x のみ）:
+  ベイク済みの通常ボリュームにリアルタイム Directional の影を掛け、ベイクしたような濃い影を出す。
+  加算ボリュームと Point Light Volume には掛けない
+- **Point Light Volume の当たり方** `_LVPointLightShading`（VRC Light Volumes 3.x のみ。0〜3、既定 0）:
+  0 は面の向きを見ない（1.4.1 と同じ）。3 は LV 3.x 自身の既定で、光源の反対を向いた面には当たらない
+- **両面描画** `_DhkCull`（Back / Front / Off。既定 Back）: PC 版と Quest 版の両方。草・葉などの板ポリ用
+- VRC Light Volumes 3.x の判定: 分解評価に使う内部関数が実在するときだけ `DHK_VRCLV_V3` を自動生成する。
+  内部関数が無い版（2.x など）は 1.4.1 と同じ公開 API の経路を使うので、LV の安定版でもコンパイルできる
+
+### 変更
+
+- `_SpecularHighlightsOff` / `_GlossyReflectionsOff` はキーワードではなくユニフォーム分岐になったが、結果は 1.4.1 と同じ
+  （Standard 互換。前者は直接光の鏡面だけを消す）。`_SpecularHighlightsOff` が ON のときは LV スペキュラも足さない
+- インスペクタ: 読み込み時に「キーワードは ON なのにトグルが 0、テクスチャは割り当て済み」の食い違いを見つけたら
+  トグルを立てて直す（スクリプトからシェーダーを差し替えた材質の修復）。Standard から乗り換えるとき、
+  ディテールマップが割り当て済みならディテールを自動で ON にする
+- バイキュービック補間を、公開された手法（GPU Gems 2 ch.20）から独自に実装し直した。
+  20 万サンプルの数値検証で、タップ位置と重みの差は最大 9e-13
+- Unity Built-in Shaders 由来の部分について、MIT ライセンスの表示を `THIRD_PARTY_NOTICES.md` に追加した
+  （1.4.1 以前は表示が欠けていた）
+- インスペクタに「VRC Light Volumes 3.x」欄（PLV の当たり方・影マスク。LV 3.x のときだけ表示）と `_DhkCull` の欄を追加した
+- 連携先が無いプロジェクトで、導入直後に生成ファイルが1回書き換わっていたのを直した（出荷時のスタブと生成結果を一致させた）
+
+### 互換性と移行
+
+- シェーダーの GUID は変えていない。既存のマテリアルはそのまま参照を保つ
+- 旧キーワード 4 本は値（トグル）で判定するようになった。古いマテリアルに残ったキーワードは無害
+- 新しいプロパティは dhk 固有の名前（`_DhkCull` / `_DhkUseRim` / `_DhkRimColor` など）にしてある。
+  lilToon などから変換したマテリアルに残っている `_Cull` / `_UseRim` などの保存値が、急に効き始めないようにするため
+- Point Light Volume の当たり方は、既定（`_LVPointLightShading` = 0）では 1.4.1 と同じく面の向きを見ない
+- バイキュービックのライトマップは、元の UV の勾配でミップを選ぶようになった。ミップ付きのライトマップを遠くから見たとき、
+  1.4.1 より少し粗いミップが選ばれうる（近距離では同じ）
+- プロジェクトの事情でバリアントを削りたい場合は、プロジェクト側の `IPreprocessShaders` などで行う。
+  `skip_variants` はペイロードを減らさない（コンパイルの総数が減るだけ）
+
 ## 1.4.1 (2026-08-23)
 
 **重要な修正: Light Volumes が入っていないプロジェクトで 1.4.0 が壊れていた。**
